@@ -17,5 +17,8 @@ scoring_output*
 # VS Code
 *.vscode*
 
+# PyCharm
+.idea/
+
 # Notebook cache
 *.ipynb_checkpoints*
