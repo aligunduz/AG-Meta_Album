@@ -8,10 +8,28 @@ Adopted from https://github.com/Frozenmad/MetaDelta
 import pickle
 import time
 import random
+import json
+from pathlib import Path
 
-TIME_LIMIT = 4500 # time limit of the whole process in seconds
-TIME_TRAIN = TIME_LIMIT - 30*60 # set aside 30min for test
 t1 = time.time()
+
+CONFIG_PATH = Path(__file__).resolve().with_name("config.json")
+with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
+    EXPERIMENT_CONFIG = json.load(config_file)["experiment_config"]
+
+TIME_TRAIN = int(EXPERIMENT_CONFIG["train_time_seconds"])
+VALIDATION_TASKS = int(EXPERIMENT_CONFIG["validation_tasks"])
+VALIDATE_EVERY_BATCHES = int(
+    EXPERIMENT_CONFIG["validate_every_batches"]
+)
+BATCHES_PER_UPDATE = 10
+
+if VALIDATE_EVERY_BATCHES % BATCHES_PER_UPDATE != 0:
+    raise ValueError(
+        "validate_every_batches must be divisible by batches per update"
+    )
+
+UPDATES_PER_VALIDATION = VALIDATE_EVERY_BATCHES // BATCHES_PER_UPDATE
 
 import os
 import torch
@@ -149,7 +167,7 @@ class MyMetaLearner(MetaLearner):
         """
         # fix the valid dataset for fair comparison
         valid_task = []
-        for task in meta_valid_generator(50):
+        for task in meta_valid_generator(VALIDATION_TASKS):
             # fixed 5-way 5-shot 5-query settings
             supp_x, supp_y = task.support_set[0], task.support_set[1]
             quer_x, quer_y = task.query_set[0], task.query_set[1]
@@ -184,12 +202,14 @@ class MyMetaLearner(MetaLearner):
         while self.timer.time_left() > 60 * 5:
             # train loop
             self.model.set_mode(True)
-            for _ in range(5):
+            for _ in range(UPDATES_PER_VALIDATION):
                 total_epoch += 1
                 self.opt.zero_grad()
                 err = 0
                 acc = 0
-                for i, batch in enumerate(meta_train_generator(10)):
+                for i, batch in enumerate(
+                    meta_train_generator(BATCHES_PER_UPDATE)
+                ):
                     self.timer.begin('train data loading')
                     X_train, y_train = batch
                     X_train = augment(X_train)
@@ -201,7 +221,10 @@ class MyMetaLearner(MetaLearner):
                     self.timer.begin('train forward')
                     feature = self.model(X_train)
                     logit = self.cls(feature)
-                    loss = F.cross_entropy(logit, y_train) / 10.
+                    loss = (
+                        F.cross_entropy(logit, y_train)
+                        / BATCHES_PER_UPDATE
+                    )
                     self.timer.end('train forward')
 
                     self.timer.begin('train backward')
@@ -217,7 +240,7 @@ class MyMetaLearner(MetaLearner):
                 torch.nn.utils.clip_grad.clip_grad_norm_(backbone_parameters + 
                     list(self.cls.parameters()), max_norm=5.0)
                 self.opt.step()
-                acc /= 10
+                acc /= BATCHES_PER_UPDATE
                 LOGGER.info('epoch %2d error: %.6f acc %.6f | time cost - dataload: %.2f forward: %.2f backward: %.2f' % (
                     total_epoch, err, acc,
                     self.timer.query_time_by_name("train data loading", 

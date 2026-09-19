@@ -5,9 +5,11 @@ initilization at meta-training time can be with:
 2. Pretrained weights (Free-style league)
 """
 import os
+import json
 import random
 import pickle
 import contextlib
+from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
@@ -72,10 +74,14 @@ class MyMetaLearner(MetaLearner):
         super().__init__(train_classes, total_classes, logger)
         
         # General data parameters
+        config_path = Path(__file__).resolve().with_name("config.json")
+        with config_path.open("r", encoding="utf-8") as config_file:
+            experiment_config = json.load(config_file)["experiment_config"]
+
         self.should_train = True
-        self.train_tasks = 20
-        self.val_tasks = 10
-        self.val_after = 5
+        self.train_tasks = int(experiment_config["train_iterations"])
+        self.val_tasks = int(experiment_config["validation_tasks"])
+        self.val_after = int(experiment_config["validate_every"])
         
         # General model parameters
         self.meta_batch_size = 1
