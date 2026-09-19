@@ -37,6 +37,9 @@ flags.DEFINE_integer("test_tasks_per_dataset", 100,
 
 flags.DEFINE_boolean("private_information", False, "Private information flag.")
 
+flags.DEFINE_boolean("save_train_raw_outputs", True,
+    "Save one ground-truth and prediction file per meta-training iteration.")
+
 flags.DEFINE_string("input_data_dir", "../public_data", "Path to the directory" 
     + " containing the meta_train and meta_test data.")
 
@@ -64,6 +67,7 @@ def main(argv) -> None:
     overwrite_previous_results = FLAGS.overwrite_previous_results
     test_tasks_per_dataset = FLAGS.test_tasks_per_dataset
     private_information = FLAGS.private_information
+    save_train_raw_outputs = FLAGS.save_train_raw_outputs
     input_data_dir = FLAGS.input_data_dir
     output_dir_ingestion = FLAGS.output_dir_ingestion
     submission_dir = FLAGS.submission_dir
@@ -77,6 +81,7 @@ def main(argv) -> None:
         + f"--overwrite_previous_results={overwrite_previous_results} " \
         + f"--max_time={max_time} " \
         + f"--test_tasks_per_dataset={test_tasks_per_dataset} " \
+        + f"--save_train_raw_outputs={save_train_raw_outputs} " \
         + f"--input_data_dir={input_data_dir} " \
         + f"--output_dir_ingestion={output_dir_ingestion} " \
         + f"--submission_dir={submission_dir}"

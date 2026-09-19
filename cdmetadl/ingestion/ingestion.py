@@ -79,6 +79,9 @@ flags.DEFINE_integer("max_time", 1000, "Max time in seconds per test task.")
 flags.DEFINE_integer("test_tasks_per_dataset", 100,
     "Number of test tasks per dataset.")
 
+flags.DEFINE_boolean("save_train_raw_outputs", True,
+    "Save one ground-truth and prediction file per meta-training iteration.")
+
 # Default location of directories
 # If no arguments to ingestion.py are provided, these are the directories used. 
 flags.DEFINE_string("input_data_dir", "../../public_data", "Path to the " 
@@ -107,6 +110,7 @@ def ingestion(argv) -> None:
     OVERWRITE_PREVIOUS_RESULTS = FLAGS.overwrite_previous_results
     MAX_TIME = FLAGS.max_time
     TEST_TASKS_PER_DATASET = FLAGS.test_tasks_per_dataset
+    SAVE_TRAIN_RAW_OUTPUTS = FLAGS.save_train_raw_outputs
 
     vprint(f"Ingestion program version: {VERSION}", VERBOSE)
     vprint(f"Using random seed: {SEED}", VERBOSE)
@@ -277,7 +281,10 @@ def ingestion(argv) -> None:
     # Create logs dir and initialize logger
     logs_dir = f"{output_dir}/logs"
     mkdir(logs_dir)
-    logger = Logger(logs_dir)
+    logger = Logger(
+        logs_dir,
+        save_train_raw_outputs=SAVE_TRAIN_RAW_OUTPUTS,
+    )
 
     # Create output model dir
     model_dir = f"{output_dir}/model"
@@ -293,10 +300,14 @@ def ingestion(argv) -> None:
     data_settings = [
         "\n----- Data settings -----",
         f"# Train datasets: {len(train_datasets_info)}",
+        f"Train dataset names: {', '.join(train_datasets_info.keys())}",
         f"# Validation datasets: {len(valid_datasets_info)}",
+        f"Validation dataset names: {', '.join(valid_datasets_info.keys())}",
         f"# Test datasets: {len(test_datasets_info)}",
+        f"Test dataset names: {', '.join(test_datasets_info.keys())}",
         f"Image size: {IMG_SIZE}",
-        f"Random seed: {SEED}"
+        f"Random seed: {SEED}",
+        f"Save train raw outputs: {SAVE_TRAIN_RAW_OUTPUTS}"
     ]
     
     if train_data_format == "task":

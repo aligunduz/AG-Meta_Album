@@ -13,12 +13,19 @@ class Logger():
     the ingestion output log of the Competition Site. 
     """
     
-    def __init__(self, logs_dir: str) -> None:
+    def __init__(
+            self,
+            logs_dir: str,
+            save_train_raw_outputs: bool = True) -> None:
         """
         Args:
             logs_dir (str): Directory where the logs should be stored.
+            save_train_raw_outputs (bool): Whether to save one ground-truth and
+                prediction file per meta-training iteration. Defaults to True
+                for backwards compatibility.
         """
         self.logs_dir = logs_dir
+        self.save_train_raw_outputs = save_train_raw_outputs
         self.meta_train_iterations = 0
         self.meta_train_logs_path = f"{self.logs_dir}/meta_train"
         self.meta_validation_iterations = 0
@@ -109,7 +116,7 @@ class Logger():
             N = None
             ground_truth = data[1].cpu().numpy()
         
-        if meta_train:
+        if meta_train and self.save_train_raw_outputs:
             # Save ground truth and predicted values
             np.savetxt(f"{ground_truth_path}/{curr_iter}", ground_truth, 
                 fmt="%d")
@@ -160,6 +167,7 @@ class Logger():
         Args:
             dir (str): Directory where the log directories should be created.
         """
-        for value_to_log in ["ground_truth", "predictions"]:
-            makedirs(f"{dir}/{value_to_log}")
-            
+        makedirs(dir)
+        if self.save_train_raw_outputs:
+            for value_to_log in ["ground_truth", "predictions"]:
+                makedirs(f"{dir}/{value_to_log}")

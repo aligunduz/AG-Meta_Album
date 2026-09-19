@@ -24,6 +24,7 @@ computed scores
 
 AS A PARTICIPANT, DO NOT MODIFY THIS CODE.
 """
+import csv
 import os
 import datetime
 import jinja2
@@ -84,6 +85,44 @@ flags.DEFINE_string("output_dir_scoring", "../../scoring_output",
 
 # Program version
 VERSION = 1.1
+
+
+def save_task_results_csv(output_dir: str, task_results: list) -> None:
+    """Save one machine-readable row for each evaluated meta-test task."""
+    fieldnames = [
+        "task_id",
+        "dataset",
+        "num_ways",
+        "num_shots",
+        "normalized_accuracy",
+        "accuracy",
+        "macro_f1",
+        "macro_precision",
+        "macro_recall",
+    ]
+    score_columns = {
+        "Normalized Accuracy": "normalized_accuracy",
+        "Accuracy": "accuracy",
+        "Macro F1 Score": "macro_f1",
+        "Macro Precision": "macro_precision",
+        "Macro Recall": "macro_recall",
+    }
+
+    output_file = os.path.join(output_dir, "task_results.csv")
+    with open(output_file, "w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+        for task_result in task_results:
+            row = {
+                "task_id": task_result["task_id"],
+                "dataset": task_result["dataset"],
+                "num_ways": task_result["num_ways"],
+                "num_shots": task_result["num_shots"],
+            }
+            for score_name, column_name in score_columns.items():
+                row[column_name] = task_result["scores"].get(score_name, "")
+            writer.writerow(row)
+
 
 def scoring(argv) -> None:
     del argv
@@ -169,6 +208,7 @@ def scoring(argv) -> None:
     scores_per_ways = dict()
     scores_per_shots = dict()
     tasks = list()
+    task_results = list()
     for i, task in enumerate(meta_test_generator(TEST_TASKS_PER_DATASET)):
         vprint(f"\tTask {i} started...", VERBOSE)
         
@@ -220,6 +260,13 @@ def scoring(argv) -> None:
             "num_shots": task_shots,
             "scores": [round(task_scores[key], 3) for key in keys],
         })
+        task_results.append({
+            "task_id": i + 1,
+            "dataset": task_dataset,
+            "num_ways": task_ways,
+            "num_shots": task_shots,
+            "scores": dict(task_scores),
+        })
         vprint("\t\t[+] Score(s) stored", VERBOSE)
         vprint(f"\t[+] Task {i} processed", VERBOSE)   
     vprint("[+] Scores computed", VERBOSE)
@@ -233,6 +280,7 @@ def scoring(argv) -> None:
         timestamp = datetime.datetime.now().strftime("%y-%m-%d-%H-%M-%S")
         mvdir(output_dir, f"{output_dir}_{timestamp}") 
     mkdir(output_dir) 
+    save_task_results_csv(output_dir, task_results)
     
     # Data for html report
     overall_scores = dict()
@@ -403,4 +451,3 @@ def scoring(argv) -> None:
 
 if __name__ == "__main__":
     app.run(scoring)
-    
