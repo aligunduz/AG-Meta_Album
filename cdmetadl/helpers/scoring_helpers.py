@@ -94,7 +94,7 @@ def mean_confidence_interval(data: list,
         scale = st.sem(data)
         if scale < 1e-15:
             scale = 1e-15
-        lb, _ = st.t.interval(alpha=confidence, df=len(data)-1, loc=mean, 
+        lb, _ = st.t.interval(confidence, df=len(data)-1, loc=mean,
             scale=scale)
         conf_int = mean - lb 
     else:

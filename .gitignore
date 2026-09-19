@@ -8,6 +8,8 @@
 # Data
 *.zip
 public_data/
+meta_album_sets/
+meta_album_openml_cache/
 ingestion_output*
 scoring_output*
 

@@ -10,6 +10,7 @@ Usage:
 AS A PARTICIPANT, DO NOT MODIFY THIS CODE. 
 """
 
+import sys
 from shlex import split
 from subprocess import call
 
@@ -93,6 +94,8 @@ def main(argv) -> None:
         
     cmd_ing = split(command_ingestion)
     cmd_sco = split(command_scoring)
+    cmd_ing[0] = sys.executable
+    cmd_sco[0] = sys.executable
     
     call(cmd_ing)
     call(cmd_sco)
