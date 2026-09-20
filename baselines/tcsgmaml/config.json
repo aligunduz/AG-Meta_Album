@@ -2,7 +2,7 @@
     "train_data_format": "task",
     "gate_init_logit": 4.0,
     "task_encoder": {
-        "checkpoint": "/content/weights.pickle.bin",
+        "checkpoint": "/content/weights.pickle",
         "forward": "fast_weights",
         "num_blocks": 18,
         "img_size": 128

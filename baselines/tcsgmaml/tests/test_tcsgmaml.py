@@ -66,7 +66,8 @@ class TinyNetwork(nn.Module):
         self.in_features = 2
         self.encoder = nn.Linear(3, 2)
         self.bn = nn.BatchNorm1d(2, momentum=1)
-        self.out = nn.Linear(2, num_classes)
+        # Mirror the real network, whose classifier lives at "model.out".
+        self.model = nn.ModuleDict({"out": nn.Linear(2, num_classes)})
         self.criterion = nn.CrossEntropyLoss()
 
     def forward_weights(self, x, weights, embedding=False):
@@ -82,12 +83,12 @@ class TinyNetwork(nn.Module):
         return torch.tanh(self.bn(self.encoder(x)))
 
     def modify_out_layer(self, num_classes):
-        self.out = nn.Linear(2, num_classes).to(self.dev)
-        nn.init.zeros_(self.out.bias)
+        self.model.out = nn.Linear(2, num_classes).to(self.dev)
+        nn.init.zeros_(self.model.out.bias)
 
     def load_params(self, state):
         self.load_state_dict({k: v for k, v in state.items()
-                              if not k.startswith("out.")}, strict=False)
+                              if not k.startswith("model.out.")}, strict=False)
 
 
 def task(ways=3, shots=2, offset=0.0):
@@ -171,8 +172,14 @@ class TaskConditionedGateTests(unittest.TestCase):
         encoder = conditioned.pop("task_encoder")
         gate_net = conditioned.pop("gate_net")
         self.assertEqual(conditioned, original)
-        self.assertIsNone(encoder["checkpoint"])
-        self.assertEqual(encoder["forward"], "fast_weights")
+        # The checkpoint path is specific to whoever runs this, so only its
+        # presence is checked here. Refusing an absent one is covered by
+        # test_encoder_refuses_to_guess_a_checkpoint.
+        self.assertIn("checkpoint", encoder)
+        self.assertEqual({key: value for key, value in encoder.items()
+                          if key != "checkpoint"},
+                         {"forward": "fast_weights", "num_blocks": 18,
+                          "img_size": 128})
         self.assertEqual(gate_net, {"hidden_size": 128, "input_norm": "none",
                                     "delta_scale": 1.0})
 
@@ -424,19 +431,58 @@ class TaskConditionedGateTests(unittest.TestCase):
             CONDITIONING.FrozenTaskEncoder.from_checkpoint(
                 str(short), torch.device("cpu"))
 
-    def test_module_eval_refuses_untracked_batchnorm_statistics(self):
-        state = self.root / "state_dict.pickle"
+    def write_state_dict(self, name, drop=()):
+        """Store a state dict checkpoint, optionally with keys removed."""
         torch.manual_seed(9)
         source = TinyNetwork(2, torch.device("cpu"))
-        with state.open("wb") as handle:
-            pickle.dump({k: v.clone() for k, v in
-                         source.state_dict().items()}, handle)
-        with self.assertRaisesRegex(ValueError, "BatchNorm"):
+        path = self.root / name
+        with path.open("wb") as handle:
+            pickle.dump({key: value.clone() for key, value
+                         in source.state_dict().items()
+                         if key not in drop}, handle)
+        return path
+
+    def test_state_dict_must_define_every_encoder_parameter(self):
+        incomplete = self.write_state_dict("no_bn_weight.pickle",
+                                           drop=("bn.weight",))
+        with self.assertRaisesRegex(ValueError, "bn.weight"):
             CONDITIONING.FrozenTaskEncoder.from_checkpoint(
-                str(state), torch.device("cpu"), forward_mode="module_eval")
+                str(incomplete), torch.device("cpu"))
+        # The classifier is the one part the task embedding never uses, so a
+        # checkpoint is allowed to leave it out.
+        headless = self.write_state_dict(
+            "no_classifier.pickle",
+            drop=("model.out.weight", "model.out.bias"))
         encoder = CONDITIONING.FrozenTaskEncoder.from_checkpoint(
-            str(state), torch.device("cpu"), forward_mode="fast_weights")
-        self.assertFalse(encoder.has_bn_statistics)
+            str(headless), torch.device("cpu"))
+        self.assertEqual(encoder.embed(self.support(4)).shape,
+                         (encoder.out_features,))
+
+    def test_module_eval_refuses_incomplete_or_untouched_statistics(self):
+        for name, drop in (("untouched_bn.pickle", ()),
+                           ("missing_bn.pickle",
+                            ("bn.running_mean", "bn.running_var"))):
+            with self.subTest(name=name):
+                path = self.write_state_dict(name, drop=drop)
+                with self.assertRaisesRegex(ValueError, "BatchNorm"):
+                    CONDITIONING.FrozenTaskEncoder.from_checkpoint(
+                        str(path), torch.device("cpu"),
+                        forward_mode="module_eval")
+                encoder = CONDITIONING.FrozenTaskEncoder.from_checkpoint(
+                    str(path), torch.device("cpu"),
+                    forward_mode="fast_weights")
+                self.assertFalse(encoder.has_bn_statistics)
+                self.assertEqual(encoder.embed(self.support(3)).shape,
+                                 (encoder.out_features,))
+
+        trained = self.write_state_dict("trained_bn.pickle")
+        state = pickle.loads(trained.read_bytes())
+        state["bn.running_var"] = torch.full_like(state["bn.running_var"], 2.0)
+        with trained.open("wb") as handle:
+            pickle.dump(state, handle)
+        encoder = CONDITIONING.FrozenTaskEncoder.from_checkpoint(
+            str(trained), torch.device("cpu"), forward_mode="module_eval")
+        self.assertTrue(encoder.has_bn_statistics)
         self.assertEqual(encoder.embed(self.support(3)).shape,
                          (encoder.out_features,))
 

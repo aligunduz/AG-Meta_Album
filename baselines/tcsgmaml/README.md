@@ -46,7 +46,10 @@ Two checkpoint forms are accepted:
   `Learner.save` writes to `weights.pickle`. This is the normal case, for
   example `ingestion_output/model/weights.pickle` from an earlier run;
 * a **state dict** saved with `torch.save`, which additionally carries the
-  BatchNorm buffers.
+  BatchNorm buffers. Apart from the classifier, which the task embedding never
+  uses, a state dict must define every encoder parameter: a partially loaded
+  encoder would mix trained and randomly initialized tensors, so the missing
+  ones are refused instead of being filled in.
 
 Do **not** point this at `model_state.pickle`. The outer optimizer updates the
 weight list, not the parameters of the `meta_learner` module, so
@@ -71,9 +74,11 @@ than against the mechanism.
   statistics of the support batch itself. This is how every network in this
   framework is trained.
 * `module_eval` extracts features through the module in eval mode, which needs
-  real BatchNorm running statistics. Checkpoints trained through
-  `forward_weights` never update those buffers, so this mode raises rather than
-  silently extracting unnormalized features.
+  a complete set of real BatchNorm running statistics. Checkpoints trained
+  through `forward_weights` never update those buffers, and a weight list
+  carries none at all, so this mode raises rather than silently extracting
+  unnormalized features. Missing buffers are refused exactly like untouched
+  ones: their absence is not evidence of valid statistics.
 
 The support set is always passed as one batch and is never chunked, because a
 different batch composition yields a different embedding.
