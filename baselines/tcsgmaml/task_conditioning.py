@@ -30,6 +30,9 @@ from network import ResNet
 PACKAGE_FORMAT = 1
 FORWARD_MODES = ("fast_weights", "module_eval")
 INPUT_NORMS = ("none", "l2", "layernorm")
+# The only part of the network the task embedding never uses, and therefore the
+# only part a checkpoint is allowed to leave out.
+CLASSIFIER_PREFIX = "model.out."
 
 
 @contextlib.contextmanager
@@ -142,31 +145,37 @@ def _tensor_fingerprint(tensors: List[torch.Tensor]) -> str:
     return digest.hexdigest()
 
 
-def _bn_statistics_are_defaults(state: OrderedDict) -> bool:
-    """ Check whether the BatchNorm buffers were ever updated.
+def _bn_statistics_are_usable(state: OrderedDict,
+                              required: List[str]) -> bool:
+    """ Check whether a checkpoint carries real BatchNorm statistics.
 
-    ``ResNet.forward_weights`` normalizes with batch statistics and never
-    writes to the module buffers, so a checkpoint trained through that path
-    keeps running_mean at zero and running_var at one. Using such a checkpoint
-    in eval mode would silently skip normalization altogether.
+    Two different things make eval-mode extraction unsafe and both are treated
+    the same way here. A checkpoint trained through ``ResNet.forward_weights``
+    normalizes with batch statistics and never writes to the module buffers, so
+    running_mean stays at zero and running_var at one. A checkpoint that omits
+    those buffers altogether says nothing either: the module would simply keep
+    its own initial values, which is the same unnormalized forward pass. The
+    absence of buffers is therefore never counted as valid statistics.
 
     Args:
         state (OrderedDict): State dict to inspect.
+        required (List[str]): Buffer names the architecture needs in eval mode.
 
     Returns:
-        bool: True when every BatchNorm buffer still holds its initial value.
+        bool: True only when every required buffer is present and at least one
+            of them has moved away from its initial value.
     """
-    seen = False
-    for key, value in state.items():
-        if key.endswith("running_mean"):
-            seen = True
-            if not torch.allclose(value, torch.zeros_like(value)):
-                return False
-        elif key.endswith("running_var"):
-            seen = True
-            if not torch.allclose(value, torch.ones_like(value)):
-                return False
-    return seen
+    if not required:
+        return False
+    if any(name not in state for name in required):
+        return False
+    for name in required:
+        value = state[name]
+        default = (torch.zeros_like(value) if name.endswith("running_mean")
+                   else torch.ones_like(value))
+        if not torch.allclose(value, default):
+            return True
+    return False
 
 
 class FrozenTaskEncoder:
@@ -224,6 +233,21 @@ class FrozenTaskEncoder:
         for parameter in network.parameters():
             parameter.requires_grad_(False)
         return network
+
+    @staticmethod
+    def _required_bn_buffers(network: ResNet) -> List[str]:
+        """ List the BatchNorm buffers eval-mode extraction depends on.
+
+        Args:
+            network (ResNet): Architecture container.
+
+        Returns:
+            List[str]: Names of the running statistics of every BatchNorm
+                layer. ``num_batches_tracked`` is left out, since eval-mode
+                normalization does not read it.
+        """
+        return [name for name, _ in network.named_buffers()
+                if name.endswith("running_mean") or name.endswith("running_var")]
 
     @staticmethod
     def _validate_against(network: ResNet,
@@ -306,19 +330,29 @@ class FrozenTaskEncoder:
         if state is not None:
             usable_state = OrderedDict(
                 (key, value) for key, value in state.items()
-                if not key.startswith("model.out."))
-            has_bn_statistics = not _bn_statistics_are_defaults(usable_state)
+                if not key.startswith(CLASSIFIER_PREFIX))
+            has_bn_statistics = _bn_statistics_are_usable(
+                usable_state, cls._required_bn_buffers(network))
             incompatible = network.load_state_dict(usable_state, strict=False)
             unexpected = list(incompatible.unexpected_keys)
             if unexpected:
                 raise ValueError(
                     f"'{path}' contains keys that do not belong to the encoder "
                     f"architecture, for example '{unexpected[0]}'.")
-            loaded = [key for key in usable_state if "running" not in key
-                      and "num_batches_tracked" not in key]
-            if not loaded:
+            # Only the classifier may be absent, because the task embedding
+            # never uses it. Every other missing parameter would leave a
+            # randomly initialized tensor inside a supposedly frozen encoder.
+            parameter_names = {name for name, _ in network.named_parameters()}
+            missing = [key for key in incompatible.missing_keys
+                       if key in parameter_names
+                       and not key.startswith(CLASSIFIER_PREFIX)]
+            if missing:
                 raise ValueError(
-                    f"'{path}' contains no encoder parameters, only buffers.")
+                    f"'{path}' is missing {len(missing)} encoder "
+                    f"parameter(s), for example '{missing[0]}'. Apart from the "
+                    "classifier, a state dict must define every encoder "
+                    "parameter; a partially loaded encoder would silently mix "
+                    "trained and randomly initialized tensors.")
             weights = [p.detach() for p in network.parameters()]
         else:
             cls._validate_against(network, weights, f"'{path}'")
@@ -332,12 +366,15 @@ class FrozenTaskEncoder:
 
         if forward_mode == "module_eval" and not has_bn_statistics:
             raise ValueError(
-                f"'{path}' carries no usable BatchNorm statistics, so "
+                f"'{path}' carries no usable BatchNorm statistics, either "
+                "because the running buffers are incomplete or because they "
+                "still hold their initial values, so "
                 "'task_encoder.forward': 'module_eval' would extract features "
                 "without normalization. Checkpoints trained through "
-                "ResNet.forward_weights never update those buffers. Use "
-                "'fast_weights', which normalizes with support-batch "
-                "statistics exactly as the network was trained.")
+                "ResNet.forward_weights never update those buffers, and a "
+                "weight list carries none at all. Use 'fast_weights', which "
+                "normalizes with support-batch statistics exactly as the "
+                "network was trained.")
 
         for weight in weights:
             weight.requires_grad_(False)
@@ -389,10 +426,19 @@ class FrozenTaskEncoder:
         weights = [w.detach().to(dev) for w in package["weights"]]
         cls._validate_against(network, weights, "The stored encoder package")
 
+        forward_mode = str(package["forward"])
         buffers = OrderedDict(
             (key, value.to(dev)) for key, value in package["buffers"].items())
         if buffers:
             network.load_state_dict(buffers, strict=False)
+        if forward_mode == "module_eval" and not _bn_statistics_are_usable(
+                buffers, cls._required_bn_buffers(network)):
+            raise ValueError(
+                "The stored encoder package claims eval-mode extraction but "
+                "carries no usable BatchNorm statistics, so meta-test would "
+                "normalize with nothing. Re-run meta-training with a "
+                "checkpoint that has real running statistics, or with "
+                "'task_encoder.forward': 'fast_weights'.")
         with torch.no_grad():
             for parameter, weight in zip(network.parameters(), weights):
                 if parameter.shape == weight.shape:
@@ -407,7 +453,7 @@ class FrozenTaskEncoder:
                 "The stored encoder weights do not match their recorded "
                 "fingerprint, so the checkpoint is inconsistent.")
         signature["fingerprint"] = fingerprint
-        return cls(network, weights, str(package["forward"]),
+        return cls(network, weights, forward_mode,
                    bool(package["has_bn_statistics"]), signature, dev)
 
     def package(self) -> Dict[str, Any]:
