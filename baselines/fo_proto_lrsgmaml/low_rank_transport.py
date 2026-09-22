@@ -54,7 +54,7 @@ class LowRankTransport(nn.Module):
                     )
 
                     self.v[key] = nn.Parameter(
-                        (initial_v / math.sqrt(weight.shape[0])).to(weight)
+                        (initial_v * (1.0 / math.sqrt(weight.shape[0]))).to(weight)
                     )
         self.reset_metrics()
 

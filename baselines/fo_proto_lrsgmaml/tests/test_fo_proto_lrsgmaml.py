@@ -242,7 +242,7 @@ class AlgorithmTests(unittest.TestCase):
             torch.testing.assert_close(transport.transport_gradient(name, grad), grad * torch.sigmoid(torch.tensor(4.)))
             self.assertEqual(key in transport.u, p.ndim >= 2)
             if key in transport.u:
-                self.assertEqual(transport.u[key].shape, (p.shape[0], 4))
+                self.assertEqual(transport.u[key].shape, (p.shape[0], min(4, p.shape[0])))
                 self.assertEqual(transport.u[key].count_nonzero().item(), 0)
                 self.assertGreater(transport.v[key].count_nonzero().item(), 0)
 
@@ -311,7 +311,7 @@ class AlgorithmTests(unittest.TestCase):
             torch.testing.assert_close(a, b, rtol=0, atol=0)
         transport = LowRankTransport(self.model, baseline.read_config()["lrsg"])
         with torch.no_grad():
-            for p in transport.v.values():
+            for p in transport.u.values():
                 p.fill_(.5)
         for ways in (2, 7, 20):
             labels = torch.arange(ways).repeat(2)

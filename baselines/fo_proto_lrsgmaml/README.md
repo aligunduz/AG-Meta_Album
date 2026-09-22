@@ -27,7 +27,7 @@ changes with way (2–20 at test), rather than stable encoder output features.
 
 The config defaults to rank 4, capped by the output dimension when necessary, fixed beta 1,
 and logit 4, matching SGMAML's safe initialization: sigmoid(4) = 0.982014.
-U starts as N(0, 0.01²), V as exact zeros.U starts as exact zeros and V is initialized from N(0, 1/C_out),
+U starts as exact zeros and V is initialized from N(0, 1/C_out),
 matching the original LRSGMAML initialization.
 The residual therefore starts exactly zero.
 At the first outer backward V has a connected but zero gradient because U=0;
