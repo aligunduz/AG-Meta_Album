@@ -17,7 +17,7 @@ class LowRankTransport(nn.Module):
         if not math.isfinite(self.beta) or not math.isfinite(logit):
             raise ValueError("beta and gate_init_logit must be finite")
         named = list(encoder.named_parameters())
-        self.names = [name for name, _ in named] + ["prototype.weight", "prototype.bias"]
+        self.names = [name for name, _ in named]
         self.shapes = [list(w.shape) for _, w in named]
         self.indices = {name: str(i) for i, name in enumerate(self.names)}
         self.logits = nn.ParameterDict()
@@ -34,8 +34,6 @@ class LowRankTransport(nn.Module):
                         initial = torch.randn(weight.shape[0], self.rank) * 0.01
                         self.u[key] = nn.Parameter(initial.to(weight))
                         self.v[key] = nn.Parameter(torch.zeros_like(self.u[key]))
-        # The prototype head has variable way and arbitrary episode class order.
-        # It receives two global scalar gates, with no class-indexed U/V.
         self.reset_metrics()
 
     def architecture(self):
