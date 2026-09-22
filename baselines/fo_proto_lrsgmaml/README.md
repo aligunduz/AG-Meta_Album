@@ -19,18 +19,19 @@ theta_fast = theta_fast - inner_lr * G_tilde
 operation. `helpers_fo_proto_lrsgmaml.py:adapt` calls it immediately before the
 reference `w - lr * g` update. Every persistent encoder tensor gets one global
 scalar logit; weights named `weight` with at least two dimensions additionally
-get U and V of shape `[weight.shape[0], rank]`. This covers ResNet Conv weights
+U and V of shape [weight.shape[0], min(rank, weight.shape[0])]. This covers ResNet Conv weights
 and Linear weights. Bias and batch-normalization parameters get scalar gates
 only. The task-local prototype W and b retain their ordinary FO-Proto-MAML
 gradient updates without transport. They do not get U/V: their output axis represents arbitrary episode class indices and
 changes with way (2–20 at test), rather than stable encoder output features.
 
-The config defaults to rank 4 (not clipped to output dimension), fixed beta 1,
+The config defaults to rank 4, capped by the output dimension when necessary, fixed beta 1,
 and logit 4, matching SGMAML's safe initialization: sigmoid(4) = 0.982014.
-U starts as N(0, 0.01²), V as exact zeros. The residual starts exactly zero.
-U initialization preserves the CPU random stream and consumes no CUDA RNG.
-At the first outer backward U has a connected but zero gradient because V=0;
-V learns immediately, and U can learn on subsequent outer steps.
+U starts as N(0, 0.01²), V as exact zeros.U starts as exact zeros and V is initialized from N(0, 1/C_out),
+matching the original LRSGMAML initialization.
+The residual therefore starts exactly zero.
+At the first outer backward V has a connected but zero gradient because U=0;
+U learns immediately, and V can learn on subsequent outer steps.
 
 Support gradients use `create_graph=False`, `retain_graph=True`, followed by
 explicit detach in transport. Thus there are no support Hessians, while query

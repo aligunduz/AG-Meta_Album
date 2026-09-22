@@ -26,14 +26,36 @@ class LowRankTransport(nn.Module):
         if self.enabled:
             for name in self.names:
                 self.logits[self.indices[name]] = nn.Parameter(named[0][1].new_tensor(logit))
-            # CPU-local RNG preserves the reference model/data random stream.
-            with torch.random.fork_rng(devices=[]):
-                for name, weight in named:
-                    if name.split(".")[-1] == "weight" and weight.ndim >= 2:
-                        key = self.indices[name]
-                        initial = torch.randn(weight.shape[0], self.rank) * 0.01
-                        self.u[key] = nn.Parameter(initial.to(weight))
-                        self.v[key] = nn.Parameter(torch.zeros_like(self.u[key]))
+            # Same initialization as baselines/lrsgmaml:
+            # U = 0, V ~ N(0, 1/C_out)
+            generator = torch.Generator(device="cpu").manual_seed(98)
+
+            for name, weight in named:
+                if name.split(".")[-1] == "weight" and weight.ndim >= 2:
+                    key = self.indices[name]
+
+                    shape = (
+                        weight.shape[0],
+                        min(self.rank, weight.shape[0])
+                    )
+
+                    initial_v = torch.randn(
+                        shape,
+                        generator=generator,
+                        dtype=weight.dtype
+                    )
+
+                    self.u[key] = nn.Parameter(
+                        torch.zeros(
+                            shape,
+                            dtype=weight.dtype,
+                            device=weight.device
+                        )
+                    )
+
+                    self.v[key] = nn.Parameter(
+                        (initial_v / math.sqrt(weight.shape[0])).to(weight)
+                    )
         self.reset_metrics()
 
     def architecture(self):

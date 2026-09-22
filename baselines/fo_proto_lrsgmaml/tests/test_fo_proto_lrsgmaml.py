@@ -243,11 +243,16 @@ class AlgorithmTests(unittest.TestCase):
             self.assertEqual(key in transport.u, p.ndim >= 2)
             if key in transport.u:
                 self.assertEqual(transport.u[key].shape, (p.shape[0], 4))
-                self.assertEqual(transport.v[key].count_nonzero().item(), 0)
+                self.assertEqual(transport.u[key].count_nonzero().item(), 0)
+                self.assertGreater(transport.v[key].count_nonzero().item(), 0)
+
                 with torch.no_grad():
-                    transport.v[key].normal_()
-                expected = (grad.reshape(p.shape[0], -1) * torch.sigmoid(torch.tensor(4.))
-                            + transport.u[key] @ transport.v[key].T @ grad.reshape(p.shape[0], -1))
+                    transport.u[key].normal_()
+
+                expected = (
+                        grad.reshape(p.shape[0], -1) * torch.sigmoid(torch.tensor(4.))
+                        + transport.u[key] @ transport.v[key].T @ grad.reshape(p.shape[0], -1)
+                )
                 torch.testing.assert_close(transport.transport_gradient(name, grad), expected.reshape_as(grad))
         alternate = LowRankTransport(model, dict(baseline.read_config()["lrsg"], rank=2, beta=.3))
         self.assertEqual(alternate.u["0"].shape, (6, 2))
@@ -272,14 +277,30 @@ class AlgorithmTests(unittest.TestCase):
         loss.backward()
         self.assertTrue(all(p.grad is not None and torch.isfinite(p.grad).all() for p in transport.parameters()))
         self.assertGreater(sum(p.grad.abs().sum() for p in transport.logits.values()).item(), 0)
-        self.assertGreater(sum(p.grad.abs().sum() for p in transport.v.values()).item(), 0)
-        # V=0 makes the first U gradient exactly zero; it is connected, not detached.
-        self.assertEqual(sum(p.grad.abs().sum() for p in transport.u.values()).item(), 0)
+        # U=0, V!=0: first outer backward updates U, while V gradient is zero.
+        self.assertGreater(
+            sum(p.grad.abs().sum() for p in transport.u.values()).item(), 0
+        )
+
+        self.assertEqual(
+            sum(p.grad.abs().sum() for p in transport.v.values()).item(), 0
+        )
+
         torch.optim.SGD(transport.parameters(), lr=.1).step()
         transport.zero_grad()
-        fast = helpers.adapt(self.model, self.weights, self.x, self.y, self.cfg, transport=transport)
-        helpers.query_loss(self.model, fast, self.x + .3, self.y)[1].backward()
-        self.assertGreater(sum(p.grad.abs().sum() for p in transport.u.values()).item(), 0)
+
+        fast = helpers.adapt(
+            self.model, self.weights, self.x, self.y,
+            self.cfg, transport=transport
+        )
+
+        helpers.query_loss(
+            self.model, fast, self.x + .3, self.y
+        )[1].backward()
+
+        self.assertGreater(
+            sum(p.grad.abs().sum() for p in transport.v.values()).item(), 0
+        )
 
     def test_disabled_equivalence_variable_way_and_eval(self):
         transport = LowRankTransport(self.model, dict(baseline.read_config()["lrsg"], enabled=False))
@@ -306,7 +327,7 @@ class AlgorithmTests(unittest.TestCase):
     def test_metrics_and_wandb(self):
         transport = LowRankTransport(self.model, baseline.read_config()["lrsg"])
         with torch.no_grad():
-            transport.v["0"].fill_(.5)
+            transport.u["0"].fill_(.5)
         grad = torch.ones_like(self.weights[0])
         transport.transport_gradient("encoder.weight", grad)
         correction = transport.u["0"] @ transport.v["0"].T @ grad
