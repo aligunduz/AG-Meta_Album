@@ -21,8 +21,8 @@ reference `w - lr * g` update. Every persistent encoder tensor gets one global
 scalar logit; weights named `weight` with at least two dimensions additionally
 get U and V of shape `[weight.shape[0], rank]`. This covers ResNet Conv weights
 and Linear weights. Bias and batch-normalization parameters get scalar gates
-only. The task-local prototype W and b each get a global scalar gate. They do
-not get U/V: their output axis represents arbitrary episode class indices and
+only. The task-local prototype W and b retain their ordinary FO-Proto-MAML
+gradient updates without transport. They do not get U/V: their output axis represents arbitrary episode class indices and
 changes with way (2–20 at test), rather than stable encoder output features.
 
 The config defaults to rank 4 (not clipped to output dimension), fixed beta 1,

@@ -181,7 +181,7 @@ class AlgorithmTests(unittest.TestCase):
         labels = torch.tensor([1, 0, 0, 1])
         transport = LowRankTransport(model, baseline.read_config()["lrsg"])
         fast = helpers.adapt(model, list(model.parameters()), x, labels,
-                             dict(self.cfg, inner_steps=1), transport=transport)
+                             dict(self.cfg, inner_steps=5), transport=transport)
         _, loss = helpers.query_loss(model, fast, x + .1, labels)
         loss.backward()
         self.assertTrue(all(p.grad is not None and torch.isfinite(p.grad).all() for p in model.parameters()))
@@ -197,6 +197,39 @@ class AlgorithmTests(unittest.TestCase):
         for key in ("gradient_transport", "low_rank_transport"):
             current["method_config"][key] = False
         self.assertEqual(current, reference)
+
+    def test_classifier_gradients_preserved_across_inner_steps(self):
+        transport = LowRankTransport(self.model, baseline.read_config()["lrsg"])
+        original_grad = torch.autograd.grad
+        previous = []
+        updates = []
+        def observe(loss, fast, **kwargs):
+            self.assertEqual(len(fast), len(self.weights) + 2)
+            self.assertEqual(fast[-2].shape, (2, 4))
+            self.assertEqual(fast[-1].shape, (2,))
+            if previous:
+                for current, initial, grad in zip(fast[-2:], previous[-1], updates[-1]):
+                    torch.testing.assert_close(current, initial - self.cfg["classifier_lr"] * grad)
+            grads = original_grad(loss, fast, **kwargs)
+            previous.append([w.detach().clone() for w in fast[-2:]])
+            updates.append([g.clamp(-self.cfg["grad_clip"], self.cfg["grad_clip"])
+                            for g in grads[-2:]])
+            return grads
+        with patch.object(torch.autograd, "grad", side_effect=observe):
+            fast = helpers.adapt(self.model, self.weights, self.x, self.y,
+                                 self.cfg, transport=transport)
+        self.assertEqual(len(previous), self.cfg["inner_steps"])
+        for current, initial, grad in zip(fast[-2:], previous[-1], updates[-1]):
+            torch.testing.assert_close(current, initial - self.cfg["classifier_lr"] * grad)
+        helpers.query_loss(self.model, fast, self.x + .2, self.y)[1].backward()
+        self.assertTrue(all(p.grad is not None for p in transport.parameters()))
+
+    def test_transport_order_mismatch_rejected(self):
+        transport = LowRankTransport(self.model, baseline.read_config()["lrsg"])
+        transport.names.reverse()
+        with self.assertRaisesRegex(ValueError, "encoder ordering"):
+            helpers.adapt(self.model, self.weights, self.x, self.y,
+                          self.cfg, transport=transport)
 
     def test_transport_formula_conv_bias_initialization_and_rng(self):
         model = nn.Sequential(nn.Conv2d(3, 6, 3), nn.BatchNorm2d(6), nn.Flatten(), nn.Linear(6, 3))

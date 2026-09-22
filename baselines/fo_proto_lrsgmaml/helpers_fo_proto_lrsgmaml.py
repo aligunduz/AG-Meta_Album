@@ -21,6 +21,8 @@ def prototype_head(features, labels, num_classes=None):
 
 @torch.enable_grad()
 def adapt(model, weights, support, labels, config, num_classes=None, transport=None):
+    if transport is not None and transport.names != [name for name, _ in model.named_parameters()]:
+        raise ValueError("LRSG parameter names must match the encoder ordering")
     features = model.forward_weights(support, weights, embedding=True)
     head = prototype_head(features, labels, num_classes)
     # Sibling clones make encoder/head independent inner-loop coordinates.
@@ -37,9 +39,12 @@ def adapt(model, weights, support, labels, config, num_classes=None, transport=N
         rates = ([config["encoder_lr"]] * len(weights)
                  + [config["classifier_lr"]] * 2)
         if transport is not None:
-            grads = [transport.transport_gradient(name, g)
-                     for name, g in zip(transport.names, grads)]
-        fast = [w - lr * g for w, lr, g in zip(fast, rates, grads)]
+            # Transport owns only encoder parameters. Preserve both task-local
+            # classifier gradients and their ordinary FO-Proto-MAML updates.
+            encoder_grads = [transport.transport_gradient(name, g)
+                             for name, g in zip(transport.names, grads[:len(weights)], strict=True)]
+            grads = encoder_grads + list(grads[len(weights):])
+        fast = [w - lr * g for w, lr, g in zip(fast, rates, grads, strict=True)]
     return fast
 
 
