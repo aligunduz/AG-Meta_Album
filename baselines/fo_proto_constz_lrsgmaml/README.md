@@ -2,8 +2,9 @@
 
 Independent control for `fo_proto_tclrsgmaml` in its LR-only setting. The
 GateNet architecture and low-rank transport parametrization are retained,
-but conditioning uses either one learned shared vector (`init="zero"`) or
-an EMA of completed training episodes (`init="ema"`). The current task's
+but conditioning uses a learned shared vector (`init="zero"`), an EMA of
+completed training episodes (`init="ema"`), or a random completed past task
+(`init="shuffle"`, training only). The current task's
 support embedding is never used for its own conditioning. In zero mode:
 
 ```text
@@ -48,22 +49,23 @@ and are never passed through transport.
 `model.py` builds `meta_parameters` as encoder parameters plus
 `list(transport.parameters())`, which includes scalar logits, U,V and GateNet,
 plus z in zero mode. The same Adam optimizer and outer gradient buffer handle
-all of them. Neither adaptation nor validation/test modifies z. EMA mode has
-no z parameter; its buffers are excluded from the optimizer.
+all of them. Neither adaptation nor validation/test modifies z. EMA and shuffle
+modes have no z parameter; their buffers are excluded from the optimizer.
 
 ## Configuration and initialization
 
 ```json
 "constant_condition": {
   "enabled": true,
-  "init": "ema",
+  "init": "shuffle",
   "ema_decay": 0.99
 }
 ```
 
-The checked-in config selects EMA. Set `init="zero"` to retain the original
-learned-z behavior; `ema_decay` is unused and optional in zero mode. EMA
-requires a finite numeric decay in `[0, 1)`. Other initialization modes and
+The checked-in config selects shuffle. Set `init="zero"` or `init="ema"` to
+retain their existing behavior; `ema_decay` is unused and optional in zero
+mode. Both EMA and shuffle require a finite numeric decay in `[0, 1)`.
+Other initialization modes and
 disabled conditioning raise an error. The LR-only GateNet settings, rank and
 beta are validated. The legacy `task_conditioning` section and
 `method_config.task_conditioned_gate=true` are retained to describe the active
@@ -91,7 +93,8 @@ optimizer parameters. For each training episode t:
    `delta_c = GateNet(m_t)[rank_output_slices]`. Cloning prevents later buffer
    updates from mutating the tensor saved for this episode's backward pass.
 3. Adaptation, query loss, backward and outer gradient bookkeeping finish.
-4. `meta_fit` calls `update_ema(e_t)` once for this completed training episode:
+4. `meta_fit` calls `complete_training_episode(e_t)`, which calls
+   `update_ema(e_t)` once for this completed training episode:
    `m <- decay * m + (1 - decay) * e_t`. This happens per episode, including
    episodes within the same meta-batch, before validation/checkpoint selection.
 
@@ -110,12 +113,47 @@ nor calls the update; `update_ema` also guards against updates in eval mode.
 They use the latest saved training EMA unchanged. Evaluation of an
 uninitialized EMA uses zero residuals and does not initialize from test data.
 
+## Shuffle training and fixed evaluation
+
+Shuffle uses the same initial support mean and post-backward publication
+boundary as EMA. Training keeps exactly the last 256 completed episodes in
+`_shuffle_embeddings`, a detached FIFO ring with shape `[256, 512]` registered
+with `persistent=False`. Each new completed task overwrites the oldest entry
+after the ring reaches capacity. Copies prevent later modification of the
+source tensor from changing history. The ring follows module device/dtype
+changes but is never optimized.
+
+For each training task, `condition()` samples one entry uniformly from the
+populated ring and passes a detached clone to the unchanged GateNet. The draw
+is reused throughout all inner steps. The current embedding is published only
+after adaptation, query loss, backward and outer bookkeeping complete. No
+current or unfinished task can enter its own sampling pool. Repeated calls on
+the same task can draw different historical embeddings. This is online
+sampling with replacement from history, not a permutation of a task batch.
+
+An empty ring bypasses GateNet and uses zero residuals, giving LRSG equivalence
+even with learned nonzero U or GateNet biases. Sampling uses a private CPU
+generator seeded 98, consistent with the baseline model seed, without consuming
+the model/data random stream. Neither zero nor EMA uses this generator.
+
+Each completed training task also updates the same EMA m as in EMA mode
+(the first task initializes it directly). Validation/test always use a clone
+of fixed m and never sample, advance the shuffle RNG, append history or update
+m. Both training-update entry points guard against eval-mode mutation.
+
+The FIFO, occupancy, write position and sampler RNG state are training-only
+state and are omitted from inference checkpoints. Only m and its initialized
+flag are additional persistent condition tensors. Loading through `MyLearner`
+starts with an empty ring and evaluates using the saved m. Training resumption
+with the historical FIFO/RNG is not supported, matching the existing lack of
+optimizer-state resumption.
+
 ## Checkpoints and logging
 
 The independent method identifier is `fo-proto-constz-lrsgmaml`.
 `max-va.pth` retains best-validation selection and stores z under
 `state.lrsg["z"]` in zero mode, or `state.lrsg["m"]` and
-`state.lrsg["m_initialized"]` in EMA mode, alongside logits/U/V and `gate_net.*`.
+`state.lrsg["m_initialized"]` in EMA/shuffle modes, alongside logits/U/V and `gate_net.*`.
 Architecture metadata records the mode, `[512]` shape and EMA decay when used.
 The original zero-mode state keys and architecture remain compatible. Strict
 loading rejects missing state or incompatible architecture. Test uses the
@@ -126,8 +164,8 @@ is not implemented, matching the reference.
 Existing logging is preserved. The `tc/` metric names remain for compatibility.
 Scalar residual metrics are zero. Low-rank task variation is zero for an
 unchanged outer state in zero mode; aggregation across optimizer updates can
-show variation because the shared parameters have changed. In EMA mode,
-completed training episodes can also change the conditioning input.
+show variation because the shared parameters have changed. In EMA/shuffle
+modes, training history and (for shuffle) the random draw also affect the input.
 
 ## Unit/synthetic validation
 
@@ -135,7 +173,7 @@ completed training episodes can also change the conditioning input.
 python -B -m unittest discover -s baselines/fo_proto_constz_lrsgmaml/tests -v
 ```
 
-20 tests pass on CPU. The original 13 zero-mode tests cover identical GateNet inputs across different
+28 tests pass on CPU. The original 13 zero-mode tests cover identical GateNet inputs across different
 episodes, bitwise identical transport for the same G, query-to-z gradients,
 outer Adam updates from default initialization, unchanged z during adaptation,
 first-order behavior, untouched W,b updates, zero scalar residual/gradient,
@@ -146,11 +184,17 @@ Seven EMA tests additionally cover no current-task leakage, exact episode
 ordering and recurrence, first-episode LRSG equivalence, detached buffers,
 optimizer exclusion, immutable backward inputs, eval isolation, checkpoint
 round-trip, config validation and TC-LR architecture/formula equivalence.
+Eight shuffle tests cover past-only sampling, repeated-task variation, the
+256-entry FIFO and detached copies, first-task equivalence, sampling RNG
+isolation, fixed eval inputs/state, TC-LR parity and outer gradients, actual
+training publication order, checkpoint round-trip without FIFO state, and
+no publication when the query fails. Existing zero/EMA tests are unchanged.
 No full Meta-Album training or real-data evaluation was run.
 
 Files: `model.py`, `task_transport.py`,
 `helpers_fo_proto_constz_lrsgmaml.py`, `config.json`,
-`tests/test_fo_proto_constz_lrsgmaml.py`, `tests/test_ema_condition.py`, this README, and unchanged local
+`tests/test_fo_proto_constz_lrsgmaml.py`, `tests/test_ema_condition.py`,
+`tests/test_shuffle_condition.py`, this README, and unchanged local
 copies of `api.py`, `network.py`, `weight_names.py`, `metadata`, `metrics.py`,
 `test.py`, `gate_net.py`, `low_rank_transport.py`. Runtime code imports only
 local copies; it does not depend on another baseline directory. The TC
@@ -158,8 +202,9 @@ evaluation ablation utility is not copied because its data-derived conditions
 are outside the scope of this control.
 
 This is a control for the value of task-specific conditioning while retaining
-GateNet capacity. Zero mode learns a global conditioning parameter; EMA mode
-uses training history and is therefore sensitive to training episode order.
-Neither chooses coefficients from the current episode's content. Whether
-task-specific conditioning improves accuracy requires a separate empirical
-comparison.
+GateNet capacity. Zero mode learns a global conditioning parameter; EMA and
+shuffle use training history and are sensitive to training episode order.
+Shuffle also changes the conditioning distribution between training (individual
+historical embeddings) and evaluation (EMA). A degradation alone therefore
+does not establish that current-task conditioning is beneficial; that requires
+a separate empirical comparison.

@@ -86,11 +86,11 @@ class MyMetaLearner(MetaLearner):
             self.transport.train()
             support, labels, _ = task.support_set
             query, targets, _ = task.query_set
-            use_ema = self.transport.init_mode == "ema"
+            use_history = self.transport.init_mode in ("ema", "shuffle")
             adapted = adapt(self.meta_learner, self.weights, support.to(self.dev),
                             labels.to(self.dev), self.params, task.num_ways, self.transport,
-                            return_task_embedding=use_ema)
-            fast, task_embedding = adapted if use_ema else (adapted, None)
+                            return_task_embedding=use_history)
+            fast, task_embedding = adapted if use_history else (adapted, None)
             out, loss = query_loss(self.meta_learner, fast, query.to(self.dev),
                                    targets.to(self.dev))
             loss.backward()
@@ -111,8 +111,8 @@ class MyMetaLearner(MetaLearner):
                 self.optimizer.zero_grad(set_to_none=True)
             # Update once per completed training episode, including episodes
             # within a meta-batch, and before validation/checkpoint selection.
-            if use_ema:
-                self.transport.update_ema(task_embedding)
+            if use_history:
+                self.transport.complete_training_episode(task_embedding)
             self.log(task, out.detach().cpu().numpy(), loss.item())
             if (i + 1) % exp["validate_every"] == 0:
                 log_metrics(self.logger, self.transport, i + 1)

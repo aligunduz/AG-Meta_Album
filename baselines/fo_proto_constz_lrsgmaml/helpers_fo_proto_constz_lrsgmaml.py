@@ -29,7 +29,7 @@ def adapt(model, weights, support, labels, config, num_classes=None, transport=N
     # The zero path and validation/test do not compute a support mean.
     task_embedding = features.detach().mean(dim=0) if return_task_embedding else None
     head = prototype_head(features, labels, num_classes)
-    # GateNet receives learned z or the previous completed training EMA only.
+    # GateNet receives z, the previous EMA, or a completed past task only.
     conditioning = transport.condition() if transport is not None else None
     # Sibling clones make encoder/head independent inner-loop coordinates.
     # Otherwise autograd would also differentiate W0(theta) in the first
