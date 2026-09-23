@@ -71,7 +71,7 @@ class MyMetaLearner(MetaLearner):
         self.meta_learner = make_encoder(self.model_args)
         self.weights = list(self.meta_learner.parameters())
         self.transport = ConstantConditionedTransport(self.meta_learner, self.config)
-        # Includes shared z, scalar logits, U/V and the unchanged TC GateNet.
+        # Includes z only in zero mode; EMA buffers are never optimized.
         self.meta_parameters = self.weights + list(self.transport.parameters())
         self.logger = logger
         self.optimizer = torch.optim.Adam(self.meta_parameters, lr=self.params["outer_lr"])
@@ -86,8 +86,11 @@ class MyMetaLearner(MetaLearner):
             self.transport.train()
             support, labels, _ = task.support_set
             query, targets, _ = task.query_set
-            fast = adapt(self.meta_learner, self.weights, support.to(self.dev),
-                         labels.to(self.dev), self.params, task.num_ways, self.transport)
+            use_ema = self.transport.init_mode == "ema"
+            adapted = adapt(self.meta_learner, self.weights, support.to(self.dev),
+                            labels.to(self.dev), self.params, task.num_ways, self.transport,
+                            return_task_embedding=use_ema)
+            fast, task_embedding = adapted if use_ema else (adapted, None)
             out, loss = query_loss(self.meta_learner, fast, query.to(self.dev),
                                    targets.to(self.dev))
             loss.backward()
@@ -106,6 +109,10 @@ class MyMetaLearner(MetaLearner):
                 self.optimizer.step()
                 buffer = [torch.zeros_like(w) for w in self.meta_parameters]
                 self.optimizer.zero_grad(set_to_none=True)
+            # Update once per completed training episode, including episodes
+            # within a meta-batch, and before validation/checkpoint selection.
+            if use_ema:
+                self.transport.update_ema(task_embedding)
             self.log(task, out.detach().cpu().numpy(), loss.item())
             if (i + 1) % exp["validate_every"] == 0:
                 log_metrics(self.logger, self.transport, i + 1)

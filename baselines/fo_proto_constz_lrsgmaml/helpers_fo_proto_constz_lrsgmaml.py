@@ -20,12 +20,16 @@ def prototype_head(features, labels, num_classes=None):
 
 
 @torch.enable_grad()
-def adapt(model, weights, support, labels, config, num_classes=None, transport=None):
+def adapt(model, weights, support, labels, config, num_classes=None, transport=None,
+          *, return_task_embedding=False):
     if transport is not None and transport.names != [name for name, _ in model.named_parameters()]:
         raise ValueError("LRSG parameter names must match the encoder ordering")
     features = model.forward_weights(support, weights, embedding=True)
+    # Return this episode-local value to the training owner, never to GateNet.
+    # The zero path and validation/test do not compute a support mean.
+    task_embedding = features.detach().mean(dim=0) if return_task_embedding else None
     head = prototype_head(features, labels, num_classes)
-    # GateNet receives only its shared outer parameter z, never episode data.
+    # GateNet receives learned z or the previous completed training EMA only.
     conditioning = transport.condition() if transport is not None else None
     # Sibling clones make encoder/head independent inner-loop coordinates.
     # Otherwise autograd would also differentiate W0(theta) in the first
@@ -47,7 +51,7 @@ def adapt(model, weights, support, labels, config, num_classes=None, transport=N
                              for name, g in zip(transport.names, grads[:len(weights)], strict=True)]
             grads = encoder_grads + list(grads[len(weights):])
         fast = [w - lr * g for w, lr, g in zip(fast, rates, grads, strict=True)]
-    return fast
+    return (fast, task_embedding) if return_task_embedding else fast
 
 
 def query_loss(model, fast, query, labels):

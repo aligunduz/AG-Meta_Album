@@ -1,4 +1,4 @@
-"""Shared LRSG bases conditioned only on a learned, episode-independent z."""
+"""Shared LRSG bases conditioned on learned z or past training episodes' EMA."""
 import math
 
 import torch
@@ -10,8 +10,13 @@ from low_rank_transport import LowRankTransport
 
 def validate_constant_condition(config):
     constant = config["constant_condition"]
-    if constant["enabled"] is not True or constant["init"] != "zero":
-        raise ValueError('constant_condition requires enabled=true and init="zero"')
+    if constant["enabled"] is not True or constant["init"] not in ("zero", "ema"):
+        raise ValueError('constant_condition requires enabled=true and init="zero" or "ema"')
+    if constant["init"] == "ema":
+        decay = constant.get("ema_decay")
+        if (type(decay) not in (int, float) or not math.isfinite(decay)
+                or not 0 <= decay < 1):
+            raise ValueError("constant_condition.ema_decay must be finite and in [0, 1)")
     required = dict(enabled=True, hidden_size=128, input_norm="none",
                     scalar_delta_scale=0, low_rank_delta_scale=1)
     if any(config["task_conditioning"][key] != value for key, value in required.items()):
@@ -27,9 +32,15 @@ class ConstantConditionedTransport(LowRankTransport):
         if encoder.in_features != 512:
             raise ValueError("ConstZ requires a 512-dimensional encoder embedding")
         super().__init__(encoder, config["lrsg"])
-        # Registered outer parameter: saved and optimized with transport, but
-        # never passed among the encoder/head fast weights. No RNG is consumed.
-        self.z = nn.Parameter(next(encoder.parameters()).new_zeros(512))
+        self.init_mode = config["constant_condition"]["init"]
+        reference = next(encoder.parameters())
+        if self.init_mode == "zero":
+            # Preserve the original parameter/state layout and optimization.
+            self.z = nn.Parameter(reference.new_zeros(512))
+        else:
+            self.ema_decay = float(config["constant_condition"]["ema_decay"])
+            self.register_buffer("m", reference.new_zeros(512))
+            self.register_buffer("m_initialized", torch.tensor(False, device=reference.device))
         cfg = config["task_conditioning"]
         self.conditioning_enabled = cfg["enabled"]
         if type(self.conditioning_enabled) is not bool:
@@ -62,8 +73,11 @@ class ConstantConditionedTransport(LowRankTransport):
                                         offset, cfg["input_norm"]).to(next(encoder.parameters()))
 
     def architecture(self):
+        constant = dict(enabled=True, init=self.init_mode, shape=[512])
+        if self.init_mode == "ema":
+            constant["ema_decay"] = self.ema_decay
         return dict(**super().architecture(),
-                    constant_condition=dict(enabled=True, init="zero", shape=[512]),
+                    constant_condition=constant,
                     task_conditioning=dict(enabled=self.conditioning_enabled,
                         gate_net=None if self.gate_net is None else self.gate_net.config(),
                         scalar_delta_scale=self.scalar_scale,
@@ -72,9 +86,17 @@ class ConstantConditionedTransport(LowRankTransport):
                         output_size=self.output_size))
 
     def condition(self):
-        # No episode argument and no detach: query loss must reach z through
-        # GateNet and the transported first-order fast updates.
-        residuals = self.gate_net(self.z)
+        # No current-episode argument. Clone the buffer to give this episode
+        # its own immutable input even if an EMA update occurs before backward.
+        if self.init_mode == "zero":
+            residuals = self.gate_net(self.z)
+        elif bool(self.m_initialized):
+            residuals = self.gate_net(self.m.detach().clone())
+        else:
+            # First episode: bypass GateNet entirely, even with learned biases.
+            # Connected zeros preserve the outer loop's no-unused-param contract.
+            zero = sum(p.sum() * 0 for p in self.gate_net.parameters())
+            residuals = self.m.new_zeros(self.output_size) + zero
         delta_a = residuals[:len(self.names)] * self.scalar_scale
         delta_c = {row["key"]: residuals[row["start"]:row["stop"]] * self.low_rank_scale
                    for row in self.rank_layout}
@@ -82,6 +104,24 @@ class ConstantConditionedTransport(LowRankTransport):
             self._record_conditioning(delta_a, residuals[len(self.names):] * self.low_rank_scale)
         # Ephemeral tensors returned to adapt; no task graph is kept on module.
         return delta_a, delta_c
+
+    @torch.no_grad()
+    def update_ema(self, task_embedding):
+        """Commit a completed training episode's detached initial support mean.
+
+        Called by meta_fit only after query/backward and the outer bookkeeping.
+        Adaptation and evaluation never commit episode information here.
+        """
+        if self.init_mode != "ema" or not self.training:
+            return
+        if task_embedding.shape != self.m.shape:
+            raise ValueError("EMA task embedding must have shape [512]")
+        embedding = task_embedding.detach().to(self.m)
+        if not bool(self.m_initialized):
+            self.m.copy_(embedding)
+            self.m_initialized.fill_(True)
+        else:
+            self.m.mul_(self.ema_decay).add_(embedding, alpha=1 - self.ema_decay)
 
     def reset_metrics(self):
         super().reset_metrics()

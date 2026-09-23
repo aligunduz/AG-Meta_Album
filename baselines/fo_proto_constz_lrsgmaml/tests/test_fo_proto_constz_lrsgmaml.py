@@ -61,6 +61,7 @@ class ConstantConditionTests(unittest.TestCase):
         self.model = Tiny().double()
         self.weights = list(self.model.parameters())
         self.config = baseline.read_config()
+        self.config["constant_condition"] = dict(enabled=True, init="zero")
         self.cfg = self.config["method_config"]
         self.transport = ConstantConditionedTransport(self.model, self.config)
         self.x = torch.randn(6, 3, dtype=torch.float64)
@@ -252,7 +253,7 @@ class ConstantConditionTests(unittest.TestCase):
         self.assertGreater(self.transport.gate_net.out.weight.grad[n:].norm().item(), 0)
         self.assertTrue(all(p.grad.abs().item() > 0 for p in self.transport.logits.values()))
 
-    def test_config_parity_and_only_zero_initialization_supported(self):
+    def test_zero_config_parity_and_invalid_modes_rejected(self):
         baseline.validate_config(self.config)
         reference = json.loads((REFERENCE / "config.json").read_text())
         adjusted = copy.deepcopy(self.config)
