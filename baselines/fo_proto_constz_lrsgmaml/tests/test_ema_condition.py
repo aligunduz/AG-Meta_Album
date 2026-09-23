@@ -1,5 +1,8 @@
 """Past-episode EMA ordering, evaluation isolation and persistence checks."""
 import copy
+import contextlib
+import io
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -12,6 +15,7 @@ from test_fo_proto_constz_lrsgmaml import (
     baseline, helpers, ConstantConditionedTransport, ReferenceTransport, Tiny,
 )
 from low_rank_transport import LowRankTransport
+from metrics import log_metrics
 
 
 class EMAConditionTests(unittest.TestCase):
@@ -256,6 +260,213 @@ class EMAConditionTests(unittest.TestCase):
                 data = torch.load(Path(directory) / "max-va.pth", weights_only=True)
                 self.assertIn("m_initialized", data["state"]["lrsg"])
                 self.assertNotIn("z", data["state"]["lrsg"])
+
+
+class EMAWarmupTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.threads = torch.get_num_threads()
+        torch.set_num_threads(1)
+
+    @classmethod
+    def tearDownClass(cls):
+        torch.set_num_threads(cls.threads)
+
+    def setUp(self):
+        torch.manual_seed(31)
+        self.config = baseline.read_config()
+        self.config["constant_condition"] = dict(
+            enabled=True, init="ema", ema_decay=.99,
+            ema_warmup_alpha=.1, ema_warmup_tasks=5000)
+        self.encoder = Tiny().double()
+
+    def transport(self, config=None):
+        return ConstantConditionedTransport(self.encoder, self.config if config is None else config)
+
+    def test_exact_5000_task_schedule_and_first_task_copy(self):
+        t = self.transport()
+        expected = torch.zeros_like(t.m)
+        for task in range(1, 5003):
+            embedding = torch.full_like(t.m, float(task % 7 - 3), requires_grad=True)
+            if task == 1:
+                expected.copy_(embedding.detach())
+            elif task <= 5000:
+                expected.mul_(.9).add_(embedding.detach(), alpha=.1)
+            else:
+                expected.mul_(.99).add_(embedding.detach(), alpha=1 - .99)
+            t.complete_training_episode(embedding)
+            self.assertTrue(torch.equal(t.m, expected), f"task {task}")
+            self.assertEqual(t.ema_completed_tasks.item(), task)
+            if task == 1:
+                self.assertTrue(torch.equal(t.m, embedding))
+                self.assertFalse(torch.equal(t.m, .1 * embedding))
+        self.assertFalse(t.m.requires_grad)
+        self.assertIsNone(t.m.grad_fn)
+        self.assertNotIn("ema_completed_tasks", dict(t.named_parameters()))
+
+    def test_warmup_endpoints_one_task_and_alpha_one(self):
+        for tasks in (1, 2):
+            config = copy.deepcopy(self.config)
+            config["constant_condition"].update(ema_warmup_alpha=1, ema_warmup_tasks=tasks)
+            t = self.transport(config)
+            first, second, third = (torch.full_like(t.m, v) for v in (2., 8., -4.))
+            t.complete_training_episode(first)
+            self.assertTrue(torch.equal(t.m, first))
+            t.complete_training_episode(second)
+            expected = second.clone() if tasks == 2 else first.mul(.99).add_(second, alpha=1 - .99)
+            self.assertTrue(torch.equal(t.m, expected))
+            t.complete_training_episode(third)
+            expected.mul_(.99).add_(third, alpha=1 - .99)
+            self.assertTrue(torch.equal(t.m, expected))
+
+    def test_absent_fields_preserve_legacy_arithmetic_and_checkpoint_layout(self):
+        config = copy.deepcopy(self.config)
+        config["constant_condition"] = dict(enabled=True, init="ema", ema_decay=.99)
+        for dtype in (torch.float32, torch.float64):
+            t = self.transport(config).to(dtype=dtype)
+            expected = torch.zeros_like(t.m)
+            for task in range(30):
+                e = torch.randn_like(t.m)
+                if task == 0:
+                    expected.copy_(e)
+                else:
+                    # Exact pre-warmup implementation, including operation order.
+                    expected.mul_(.99).add_(e, alpha=1 - .99)
+                t.complete_training_episode(e)
+                self.assertTrue(torch.equal(t.m, expected))
+            self.assertEqual(t.architecture()["constant_condition"],
+                             dict(enabled=True, init="ema", shape=[512], ema_decay=.99))
+            reference_keys = set(ReferenceTransport(self.encoder, config).state_dict())
+            self.assertEqual(set(t.state_dict()) - reference_keys, {"m", "m_initialized"})
+            self.assertFalse(hasattr(t, "ema_completed_tasks"))
+
+    def test_validation_of_warmup_fields(self):
+        for missing in ("ema_warmup_alpha", "ema_warmup_tasks"):
+            config = copy.deepcopy(self.config)
+            del config["constant_condition"][missing]
+            with self.assertRaisesRegex(ValueError, "appear together"):
+                baseline.validate_config(config)
+        for mode in ("zero", "shuffle"):
+            config = copy.deepcopy(self.config)
+            config["constant_condition"]["init"] = mode
+            with self.assertRaisesRegex(ValueError, "only valid"):
+                baseline.validate_config(config)
+        for field, bad_values in (
+                ("ema_warmup_alpha", (0, -1, 1.01, float("nan"), float("inf"), True, None, ".1")),
+                ("ema_warmup_tasks", (0, -1, 2.0, True, None, "5000"))):
+            for value in bad_values:
+                with self.subTest(field=field, value=value):
+                    config = copy.deepcopy(self.config)
+                    config["constant_condition"][field] = value
+                    with self.assertRaisesRegex(ValueError, field):
+                        baseline.validate_config(config)
+        baseline.validate_config(self.config)
+
+    def test_eval_never_changes_ema_or_schedule_count(self):
+        for initialized in (False, True):
+            t = self.transport()
+            if initialized:
+                t.complete_training_episode(torch.ones_like(t.m))
+            t.eval()
+            before = copy.deepcopy(t.state_dict())
+            t.condition()
+            t.complete_training_episode(torch.full_like(t.m, 100))
+            t.update_ema(torch.full_like(t.m, -100))
+            for name, value in before.items():
+                self.assertTrue(torch.equal(t.state_dict()[name], value), name)
+
+    def test_checkpoint_persists_count_and_rejects_different_schedule(self):
+        config = copy.deepcopy(self.config)
+        config["constant_condition"]["ema_warmup_tasks"] = 3
+        t = self.transport(config)
+        t.complete_training_episode(torch.ones_like(t.m))
+        t.complete_training_episode(torch.full_like(t.m, 3))
+        state = baseline.snapshot(self.encoder, t)
+        args = dict(num_classes=2, dev=torch.device("cpu"), num_blocks=18, pretrained=False)
+        with patch.object(baseline, "make_encoder", side_effect=lambda args: Tiny().double()), patch.object(
+                torch.cuda, "is_available", return_value=False), tempfile.TemporaryDirectory() as directory:
+            learner = baseline.MyLearner(args, state, config, .5)
+            learner.save(directory)
+            restored = baseline.MyLearner()
+            restored.load(directory)
+            self.assertEqual(restored.transport.ema_completed_tasks.item(), 2)
+            self.assertTrue(torch.equal(restored.transport.m, t.m))
+            restored.transport.train()
+            for value in (-2., 8.):
+                e = torch.full_like(t.m, value)
+                t.complete_training_episode(e)
+                restored.transport.complete_training_episode(e)
+                self.assertTrue(torch.equal(restored.transport.m, t.m))
+                self.assertEqual(restored.transport.ema_completed_tasks.item(), t.ema_completed_tasks.item())
+            original = torch.load(Path(directory) / "max-va.pth", weights_only=True)
+            for change in (dict(ema_warmup_alpha=.2), dict(ema_warmup_tasks=4), None):
+                data = copy.deepcopy(original)
+                constant = data["config"]["constant_condition"]
+                if change is None:
+                    del constant["ema_warmup_alpha"], constant["ema_warmup_tasks"]
+                else:
+                    constant.update(change)
+                torch.save(data, Path(directory) / "max-va.pth")
+                with self.assertRaisesRegex(ValueError, "architecture mismatch"):
+                    baseline.MyLearner().load(directory)
+
+    def test_training_lifecycle_counts_tasks_not_optimizer_steps(self):
+        config = copy.deepcopy(self.config)
+        config["constant_condition"]["ema_warmup_tasks"] = 3
+        config["experiment_config"] = dict(train_iterations=6, validation_tasks=1, validate_every=2)
+        x = torch.randn(6, 3)
+        y = torch.tensor([0, 1, 0, 1, 0, 1])
+        tasks = [SimpleNamespace(num_ways=2, support_set=(x + i, y, y),
+                                  query_set=(x - i - .2, y, y)) for i in range(6)]
+        with patch.object(baseline, "ResNet", Tiny), patch.object(baseline, "read_config", return_value=config), patch.object(
+                torch.cuda, "is_available", return_value=False):
+            meta = baseline.MyMetaLearner(2, 2, SimpleNamespace(log=lambda *a, **kw: None))
+            t = meta.transport
+            completed, backprop = [], []
+            complete, query = t.complete_training_episode, baseline.query_loss
+            expected = t.m.clone()
+            def query_call(*args, **kwargs):
+                result = query(*args, **kwargs)
+                if t.training:
+                    result[1].register_hook(lambda g: backprop.append(True))
+                return result
+            def commit(e):
+                self.assertEqual(len(backprop), len(completed) + 1)
+                self.assertEqual(t.ema_completed_tasks.item(), len(completed))
+                if not completed:
+                    expected.copy_(e)
+                elif len(completed) < 3:
+                    expected.mul_(.9).add_(e, alpha=.1)
+                else:
+                    expected.mul_(.99).add_(e, alpha=1 - .99)
+                complete(e)
+                completed.append(e.clone())
+                self.assertTrue(torch.equal(t.m, expected))
+                self.assertEqual(t.ema_completed_tasks.item(), len(completed))
+            with patch.object(t, "complete_training_episode", side_effect=commit), patch.object(
+                    baseline, "query_loss", side_effect=query_call), patch.object(
+                    meta.optimizer, "step", wraps=meta.optimizer.step) as optimizer_step:
+                meta.meta_fit(lambda n: iter(tasks[:n]), lambda n: iter([tasks[0]] * n))
+            self.assertEqual(len(completed), 6)
+            self.assertEqual(optimizer_step.call_count, 3)
+            self.assertEqual(t.ema_completed_tasks.item(), 6)
+
+    def test_5k_logging_keeps_required_metrics_and_does_not_reset_schedule(self):
+        self.assertEqual(self.config["experiment_config"]["validate_every"], 5000)
+        t = self.transport()
+        t.complete_training_episode(torch.ones_like(t.m))
+        condition = t.condition()
+        name, p = next(self.encoder.named_parameters())
+        t.transport_gradient(name, torch.ones_like(p), condition)
+        before = t.ema_completed_tasks.clone()
+        with tempfile.TemporaryDirectory() as directory, contextlib.redirect_stdout(io.StringIO()):
+            log_metrics(SimpleNamespace(logs_dir=directory), t, 5000)
+            record = json.loads((Path(directory) / "lrsg_metrics.jsonl").read_text())
+        self.assertEqual(record["iteration"], 5000)
+        self.assertTrue({"tc/low_rank_delta_abs_mean", "lrsg/u_norm",
+                         "tc/low_rank_delta_task_std_mean", "lrsg/correction_to_gradient_ratio",
+                         "lrsg/v_norm"}.issubset(record))
+        self.assertTrue(torch.equal(before, t.ema_completed_tasks))
 
 
 if __name__ == "__main__":

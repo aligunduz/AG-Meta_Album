@@ -54,7 +54,9 @@
   },
   "constant_condition": {
     "enabled": true,
-    "init": "shuffle",
-    "ema_decay": 0.99
+    "init": "ema",
+    "ema_decay": 0.99,
+    "ema_warmup_alpha": 0.1,
+    "ema_warmup_tasks": 5000
   }
 }

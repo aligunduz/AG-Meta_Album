@@ -17,6 +17,19 @@ def validate_constant_condition(config):
         if (type(decay) not in (int, float) or not math.isfinite(decay)
                 or not 0 <= decay < 1):
             raise ValueError("constant_condition.ema_decay must be finite and in [0, 1)")
+    warmup_keys = ("ema_warmup_alpha", "ema_warmup_tasks")
+    if any(key in constant for key in warmup_keys):
+        if not all(key in constant for key in warmup_keys):
+            raise ValueError("ema_warmup_alpha and ema_warmup_tasks must appear together")
+        if constant["init"] != "ema":
+            raise ValueError('EMA warm-up is only valid for init="ema"')
+        alpha = constant["ema_warmup_alpha"]
+        if (type(alpha) not in (int, float) or not math.isfinite(alpha)
+                or not 0 < alpha <= 1):
+            raise ValueError("ema_warmup_alpha must be finite and in (0, 1]")
+        tasks = constant["ema_warmup_tasks"]
+        if type(tasks) is not int or tasks < 1:
+            raise ValueError("ema_warmup_tasks must be a positive integer")
     required = dict(enabled=True, hidden_size=128, input_norm="none",
                     scalar_delta_scale=0, low_rank_delta_scale=1)
     if any(config["task_conditioning"][key] != value for key, value in required.items()):
@@ -33,7 +46,14 @@ class ConstantConditionedTransport(LowRankTransport):
             raise ValueError("ConstZ requires a 512-dimensional encoder embedding")
         super().__init__(encoder, config["lrsg"])
         self.init_mode = config["constant_condition"]["init"]
+        self.ema_warmup_tasks = config["constant_condition"].get("ema_warmup_tasks")
         reference = next(encoder.parameters())
+        if self.ema_warmup_tasks is not None:
+            self.ema_warmup_alpha = float(config["constant_condition"]["ema_warmup_alpha"])
+            # Only the opt-in schedule adds state; legacy checkpoint keys stay
+            # unchanged. Count completed training tasks, never optimizer steps.
+            self.register_buffer("ema_completed_tasks",
+                                 torch.tensor(0, dtype=torch.long, device=reference.device))
         if self.init_mode == "zero":
             # Preserve the original parameter/state layout and optimization.
             self.z = nn.Parameter(reference.new_zeros(512))
@@ -85,6 +105,9 @@ class ConstantConditionedTransport(LowRankTransport):
         constant = dict(enabled=True, init=self.init_mode, shape=[512])
         if self.init_mode in ("ema", "shuffle"):
             constant["ema_decay"] = self.ema_decay
+        if self.ema_warmup_tasks is not None:
+            constant.update(ema_warmup_alpha=self.ema_warmup_alpha,
+                            ema_warmup_tasks=self.ema_warmup_tasks)
         if self.init_mode == "shuffle":
             constant["shuffle_capacity"] = 256
         return dict(**super().architecture(),
@@ -132,6 +155,8 @@ class ConstantConditionedTransport(LowRankTransport):
         if self.init_mode == "zero" or not self.training:
             return
         self.update_ema(task_embedding)
+        if self.ema_warmup_tasks is not None:
+            self.ema_completed_tasks.add_(1)
         if self.init_mode == "shuffle":
             self._shuffle_embeddings[self._shuffle_next].copy_(task_embedding.detach())
             self._shuffle_next = (self._shuffle_next + 1) % 256
@@ -153,6 +178,11 @@ class ConstantConditionedTransport(LowRankTransport):
         if not bool(self.m_initialized):
             self.m.copy_(embedding)
             self.m_initialized.fill_(True)
+        elif (self.ema_warmup_tasks is not None
+              and self.ema_completed_tasks.item() < self.ema_warmup_tasks):
+            # Counter excludes this task until complete_training_episode returns:
+            # task 5000 sees 4999; task 5001 sees 5000. Task 1 always copies above.
+            self.m.mul_(1 - self.ema_warmup_alpha).add_(embedding, alpha=self.ema_warmup_alpha)
         else:
             self.m.mul_(self.ema_decay).add_(embedding, alpha=1 - self.ema_decay)
 

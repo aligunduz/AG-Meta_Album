@@ -57,14 +57,17 @@ modes have no z parameter; their buffers are excluded from the optimizer.
 ```json
 "constant_condition": {
   "enabled": true,
-  "init": "shuffle",
-  "ema_decay": 0.99
+  "init": "ema",
+  "ema_decay": 0.99,
+  "ema_warmup_alpha": 0.1,
+  "ema_warmup_tasks": 5000
 }
 ```
 
-The checked-in config selects shuffle. Set `init="zero"` or `init="ema"` to
-retain their existing behavior; `ema_decay` is unused and optional in zero
-mode. Both EMA and shuffle require a finite numeric decay in `[0, 1)`.
+The experiment config selects EMA with an optional early warm-up. Remove both
+warm-up keys to recover the original EMA schedule. To select `init="zero"`
+or `init="shuffle"`, also remove both warm-up keys. `ema_decay` is unused and
+optional in zero mode. Both EMA and shuffle require a finite numeric decay in `[0, 1)`.
 Other initialization modes and
 disabled conditioning raise an error. The LR-only GateNet settings, rank and
 beta are validated. The legacy `task_conditioning` section and
@@ -113,6 +116,31 @@ nor calls the update; `update_ema` also guards against updates in eval mode.
 They use the latest saved training EMA unchanged. Evaluation of an
 uninitialized EMA uses zero residuals and does not initialize from test data.
 
+### Optional EMA warm-up ablation
+
+Both `ema_warmup_alpha` and `ema_warmup_tasks` must be present together, and
+are valid only for `init="ema"`. Alpha must be a finite number in `(0, 1]`;
+the task limit must be a positive integer (booleans are rejected).
+
+For the experiment config above, the update after each completed training task is:
+
+- Task 1: `m = e_1` exactly, preserving the existing initialization.
+- Tasks 2 through 5000 inclusive: `m = 0.9 * m + 0.1 * e_t`.
+- Task 5001 onward: `m = 0.99 * m + (1 - 0.99) * e_t`.
+
+The persistent integer buffer `ema_completed_tasks` advances only in
+`complete_training_episode()`, after that task's EMA update. Each episode
+counts, including both tasks in a two-task meta-batch. The existing lifecycle
+still commits after query/backward and before validation, so the current
+embedding never conditions its own task. Evaluation changes neither m nor
+the counter, and interval metric resets do not reset the counter.
+
+Without the two fields, the exact previous multiply/add operations, state
+keys and architecture metadata are retained. Zero and shuffle modes are
+unchanged. The counter is registered only when warm-up is explicitly enabled.
+Warm-up with a task limit of 1 performs the usual first-task copy and uses the
+normal decay immediately afterward.
+
 ## Shuffle training and fixed evaluation
 
 Shuffle uses the same initial support mean and post-backward publication
@@ -155,6 +183,11 @@ The independent method identifier is `fo-proto-constz-lrsgmaml`.
 `state.lrsg["z"]` in zero mode, or `state.lrsg["m"]` and
 `state.lrsg["m_initialized"]` in EMA/shuffle modes, alongside logits/U/V and `gate_net.*`.
 Architecture metadata records the mode, `[512]` shape and EMA decay when used.
+Warm-up checkpoints additionally store both schedule fields in architecture
+metadata and `state.lrsg["ema_completed_tasks"]`. Loading under a different
+alpha/task limit, or without the saved warm-up schedule, fails the existing
+architecture comparison; loading restores the counter along with m. Legacy
+checkpoints without warm-up keep their existing loading contract.
 The original zero-mode state keys and architecture remain compatible. Strict
 loading rejects missing state or incompatible architecture. Test uses the
 training EMA saved with the selected best-validation checkpoint; later
@@ -166,6 +199,9 @@ Scalar residual metrics are zero. Low-rank task variation is zero for an
 unchanged outer state in zero mode; aggregation across optimizer updates can
 show variation because the shared parameters have changed. In EMA/shuffle
 modes, training history and (for shuffle) the random draw also affect the input.
+The validation/logging interval stays at 5000 tasks. Existing metrics include
+`tc/low_rank_delta_abs_mean`, `lrsg/u_norm`, `tc/low_rank_delta_task_std_mean`,
+`lrsg/correction_to_gradient_ratio` and `lrsg/v_norm` with unchanged names.
 
 ## Unit/synthetic validation
 
@@ -173,7 +209,7 @@ modes, training history and (for shuffle) the random draw also affect the input.
 python -B -m unittest discover -s baselines/fo_proto_constz_lrsgmaml/tests -v
 ```
 
-28 tests pass on CPU. The original 13 zero-mode tests cover identical GateNet inputs across different
+36 tests pass on CPU. The original 13 zero-mode tests cover identical GateNet inputs across different
 episodes, bitwise identical transport for the same G, query-to-z gradients,
 outer Adam updates from default initialization, unchanged z during adaptation,
 first-order behavior, untouched W,b updates, zero scalar residual/gradient,
@@ -189,6 +225,11 @@ Eight shuffle tests cover past-only sampling, repeated-task variation, the
 isolation, fixed eval inputs/state, TC-LR parity and outer gradients, actual
 training publication order, checkpoint round-trip without FIFO state, and
 no publication when the query fails. Existing zero/EMA tests are unchanged.
+Eight additional warm-up tests cover exact initialization and the 5000/5001
+boundary, endpoint values, bitwise legacy arithmetic in float32/float64,
+invalid configurations, frozen eval state, checkpoint schedule validation and
+counter persistence, per-task counting inside meta-batches, and the five
+required interval metrics without resetting the schedule.
 No full Meta-Album training or real-data evaluation was run.
 
 Files: `model.py`, `task_transport.py`,
