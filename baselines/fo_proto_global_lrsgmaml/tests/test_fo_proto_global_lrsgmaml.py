@@ -1,8 +1,10 @@
 """CPU/synthetic regression checks for the independent global coefficient baseline."""
 import ast
 import copy
+from contextlib import redirect_stdout
 import importlib.util
 import inspect
+import io
 import json
 from pathlib import Path
 import sys
@@ -21,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 import model as baseline
 import helpers_fo_proto_global_lrsgmaml as helpers
 from low_rank_transport import GlobalLowRankTransport
+from metrics import log_metrics
 
 
 def load_reference(name, filename):
@@ -347,6 +350,49 @@ class GlobalCoefficientTests(unittest.TestCase):
         self.assertAlmostEqual(metrics["lrsg/correction_to_gradient_ratio"], float((correction.norm() / (gradient.norm() + 1e-12)).detach()))
         self.transport.reset_metrics()
         self.assertEqual(self.transport._count, 0)
+
+    def test_global_coefficient_metrics_concatenate_layers_and_log_without_mutation(self):
+        # Unequal ranks distinguish concatenation from averaging per-layer statistics.
+        encoder = nn.Sequential(nn.Linear(3, 4), nn.Linear(4, 2)).double()
+        transport = GlobalLowRankTransport(encoder, self.config["lrsg"])
+        with torch.no_grad():
+            transport.global_delta_c["0"].copy_(torch.tensor([-3., 0., 1., 2.]))
+            transport.global_delta_c["2"].copy_(torch.tensor([4., -2.]))
+        for parameter in transport.parameters():
+            parameter.grad = torch.full_like(parameter, .125)
+        before = copy.deepcopy(transport.state_dict())
+        gradients = [p.grad.clone() for p in transport.parameters()]
+        rng = torch.random.get_rng_state().clone()
+        values = transport.metrics()
+        expected = dict(global_delta_c_mean=2 / 6, global_delta_c_mean_abs=12 / 6,
+                        global_delta_c_norm=34 ** .5, global_delta_c_max_abs=4.)
+        for key, value in expected.items():
+            self.assertIsInstance(values["lrsg/" + key], float)
+            self.assertAlmostEqual(values["lrsg/" + key], value)
+        calls = []
+        stdout = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory, redirect_stdout(stdout), \
+                patch.dict(sys.modules, wandb=SimpleNamespace(run=object(), log=calls.append)):
+            log_metrics(SimpleNamespace(logs_dir=directory), transport, 5)
+            record = json.loads((Path(directory) / "lrsg_metrics.jsonl").read_text())
+        self.assertEqual(record, dict(iteration=5, **values))
+        self.assertEqual(calls, [record])
+        self.assertEqual(json.loads(stdout.getvalue()), record)
+        for key, value in before.items():
+            torch.testing.assert_close(transport.state_dict()[key], value, rtol=0, atol=0)
+        for parameter, gradient in zip(transport.parameters(), gradients):
+            torch.testing.assert_close(parameter.grad, gradient, rtol=0, atol=0)
+        self.assertTrue(torch.equal(torch.random.get_rng_state(), rng))
+
+    def test_global_coefficient_metrics_zero_empty_and_disabled(self):
+        scalar_only = GlobalLowRankTransport(nn.BatchNorm1d(3), self.config["lrsg"])
+        self.assertEqual(len(scalar_only.global_delta_c), 0)
+        for transport in (self.transport, scalar_only):
+            values = transport.metrics()
+            for suffix in ("mean", "mean_abs", "norm", "max_abs"):
+                self.assertEqual(values["lrsg/global_delta_c_" + suffix], 0.0)
+        disabled = GlobalLowRankTransport(self.model, dict(self.config["lrsg"], enabled=False))
+        self.assertEqual(disabled.metrics(), {})
 
     def test_real_resnet_cpu_exact_equivalence_and_outer_backward(self):
         encoder = baseline.make_encoder(dict(num_classes=2, dev=torch.device("cpu"), num_blocks=18, pretrained=False))

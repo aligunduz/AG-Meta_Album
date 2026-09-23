@@ -111,4 +111,13 @@ class GlobalLowRankTransport(nn.Module):
         for name, params in (("u_norm", self.u), ("v_norm", self.v)):
             values[name] = (torch.stack([p.norm() for p in params.values()]).mean().item()
                             if len(params) else 0.0)
+        if len(self.global_delta_c):
+            coefficients = torch.cat([p.reshape(-1) for p in self.global_delta_c.values()])
+            values.update(global_delta_c_mean=coefficients.mean().item(),
+                          global_delta_c_mean_abs=coefficients.abs().mean().item(),
+                          global_delta_c_norm=coefficients.norm().item(),
+                          global_delta_c_max_abs=coefficients.abs().max().item())
+        else:
+            values.update(global_delta_c_mean=0.0, global_delta_c_mean_abs=0.0,
+                          global_delta_c_norm=0.0, global_delta_c_max_abs=0.0)
         return {"lrsg/" + k: v for k, v in values.items()}
