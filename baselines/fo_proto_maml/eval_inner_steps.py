@@ -67,6 +67,12 @@ def main():
     parser.add_argument("--seed", type=int, default=93)
     parser.add_argument("--image_size", type=int, default=128)
     parser.add_argument("--test_tasks_per_dataset", type=int, default=100)
+    parser.add_argument(
+        "--encoder_lr",
+        type=float,
+        default=None,
+        help="Optional test-time override for method_config encoder_lr"
+    )
     args = parser.parse_args()
     steps = sorted({int(s) for s in args.inner_steps.split(",")})
     longest = steps[-1]
@@ -74,8 +80,11 @@ def main():
     learner = MyLearner()
     learner.load(args.checkpoint)
     base_config = dict(learner.config["method_config"])
+    if args.encoder_lr is not None:
+        base_config["encoder_lr"] = args.encoder_lr
     print(f"Loaded {args.checkpoint} (best val {learner.best_score:.4f}); "
-          f"trained inner_steps={base_config['inner_steps']}; evaluating {steps}")
+          f"trained inner_steps={base_config['inner_steps']}; "
+          f"encoder_lr={base_config['encoder_lr']}; evaluating {steps}")
 
     _, _, test_info = prepare_datasets_information(
         args.input_data_dir, learner.config["validation_datasets"], args.seed, False)
