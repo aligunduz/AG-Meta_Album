@@ -157,16 +157,18 @@ def require_finite(values):
             raise ValueError(f"Nonfinite diagnostic: {name}={value}")
 
 
-def evaluate_task(learner, task, task_id):
+def evaluate_task(learner, task, task_id, base_config=None):
     support_x, support_y, _ = task.support_set
     query_x, query_y, _ = task.query_set
     support_set = (support_x, support_y, None, task.num_ways, task.num_shots)
     row = dict(task_id=task_id, dataset=task.dataset,
                num_ways=task.num_ways, num_shots=task.num_shots)
     original_config = learner.config["method_config"]
+    if base_config is None:
+        base_config = original_config
     try:
         for steps in (0, 5):
-            learner.config["method_config"] = dict(original_config, inner_steps=steps)
+            learner.config["method_config"] = dict(base_config, inner_steps=steps)
             predictor = learner.fit(support_set)
             probabilities = predictor.predict(query_x)
             if not np.isfinite(probabilities).all():
@@ -249,6 +251,12 @@ def main(argv=None):
     parser.add_argument("--seed", type=int, default=93)
     parser.add_argument("--image_size", type=int, default=128)
     parser.add_argument("--test_tasks_per_dataset", type=int, default=100)
+    parser.add_argument(
+        "--encoder_lr",
+        type=float,
+        default=None,
+        help="Optional test-time override for method_config encoder_lr"
+    )
     args = parser.parse_args(argv)
     if not 0 <= args.seed < 2**32 or args.image_size < 1 or args.test_tasks_per_dataset < 1:
         parser.error("Require uint32 --seed, positive --image_size and --test_tasks_per_dataset")
@@ -258,8 +266,12 @@ def main(argv=None):
     learner = MyLearner()
     learner.load(args.checkpoint)
     validate_checkpoint_config(learner.config)
+    base_config = dict(learner.config["method_config"])
+    if args.encoder_lr is not None:
+        base_config["encoder_lr"] = args.encoder_lr
     print(f"Loaded LR-only-TC checkpoint {args.checkpoint}; "
-          f"saved inner_steps={learner.config['method_config']['inner_steps']}; evaluating [0, 5]", flush=True)
+          f"saved inner_steps={base_config['inner_steps']}; "
+          f"encoder_lr={base_config['encoder_lr']}; evaluating [0, 5]", flush=True)
     # Deliberately identical to the FO-Proto-MAML diagnostic and normal ingestion:
     # the CLI seed controls BOTH dataset preparation and episode sampling.
     _, _, test_info = prepare_datasets_information(
@@ -281,7 +293,7 @@ def main(argv=None):
         writer = csv.DictWriter(handle, fieldnames=FIELDS)
         writer.writeheader()
         for count, task in enumerate(loader.generator(args.test_tasks_per_dataset), 1):
-            row = evaluate_task(learner, task, count)
+            row = evaluate_task(learner, task, count, base_config=base_config)
             if reference is not None:
                 reference.check(row)
             writer.writerow(row)
