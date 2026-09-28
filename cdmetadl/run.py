@@ -11,6 +11,7 @@ AS A PARTICIPANT, DO NOT MODIFY THIS CODE.
 """
 
 import sys
+from pathlib import Path
 from shlex import split
 from subprocess import call
 
@@ -102,8 +103,18 @@ def main(argv) -> None:
     cmd_ing[0] = sys.executable
     cmd_sco[0] = sys.executable
     
-    call(cmd_ing)
-    call(cmd_sco)
+    if Path(submission_dir).resolve().name == "fo_proto_lr_hybrid_ema_warmup":
+        # Preserve the notebook CLI and the shared ingestion implementation.
+        cmd_ing[2] = "baselines.fo_proto_lr_hybrid_ema_warmup.experiment_ingestion"
+        code = call(cmd_ing)
+        if code:
+            raise SystemExit(code)
+        code = call(cmd_sco)
+        if code:
+            raise SystemExit(code)
+    else:
+        call(cmd_ing)
+        call(cmd_sco)
 
 
 if __name__ == "__main__":

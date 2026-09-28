@@ -80,7 +80,8 @@ class MyMetaLearner(MetaLearner):
         self.best_state = None
         self.training_step = 0
         self.validation_round = 0
-        self.writer = EpisodeWriter(Path(logger.logs_dir) / "embeddings", self.config)
+        self.config["run_name"] = Path(logger.logs_dir).resolve().parent.parent.name
+        self.writer = EpisodeWriter(Path(logger.logs_dir).parent / "model" / "embeddings", self.config)
 
     def meta_fit(self, meta_train_generator, meta_valid_generator):
         exp = self.config["experiment_config"]
@@ -243,7 +244,7 @@ class MyLearner(Learner):
         self.config = data["config"]
         self.best_score = data["best_validation_accuracy"]
         self._initialize()
-        self.writer = EpisodeWriter(checkpoint.parent.parent / "logs" / "embeddings", self.config)
+        self.writer = EpisodeWriter(checkpoint.parent / "embeddings", self.config)
 
     def record_test_episode(self, task, predictions, ordinal):
         logits = torch.as_tensor(predictions).clamp_min(1e-30).log()

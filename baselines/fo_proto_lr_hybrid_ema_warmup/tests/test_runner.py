@@ -55,3 +55,38 @@ class RunnerTests(unittest.TestCase):
                 run_baseline_experiment(input_data_dir="data", output_dir="results", drive_results_dir="drive")
             self.assertEqual(run.call_count, 1)
             copy.assert_not_called()
+
+
+class ColabCompatibilityTests(unittest.TestCase):
+    def options(self, baseline, seed):
+        from types import SimpleNamespace
+        return SimpleNamespace(seed=seed, verbose=True, debug_mode=1, image_size=128,
+            max_time=1000, overwrite_previous_results=False, test_tasks_per_dataset=100,
+            private_information=False, save_train_raw_outputs=False,
+            input_data_dir="/content/data", output_dir_ingestion="/content/run/ingestion",
+            output_dir_scoring="/content/run/scoring",
+            submission_dir="/content/AG-Meta_Album/baselines/"+baseline)
+
+    def test_unchanged_colab_cli_selects_hybrid_for_any_data_seed(self):
+        import cdmetadl.run as runner
+        for seed in (93, 95):
+            with patch.object(runner,"FLAGS",self.options("fo_proto_lr_hybrid_ema_warmup",seed)), patch.object(runner,"call",return_value=0) as call:
+                runner.main([])
+                commands=[c.args[0] for c in call.call_args_list]
+                self.assertEqual(commands[0][2],"baselines.fo_proto_lr_hybrid_ema_warmup.experiment_ingestion")
+                self.assertEqual(commands[1][2],"cdmetadl.scoring.scoring")
+                self.assertTrue(all("--seed="+str(seed) in c for c in commands))
+
+    def test_existing_colab_baseline_keeps_shared_ingestion(self):
+        import cdmetadl.run as runner
+        with patch.object(runner,"FLAGS",self.options("fo_proto_tclrsgmaml",95)), patch.object(runner,"call",return_value=0) as call:
+            runner.main([])
+            self.assertEqual(call.call_args_list[0].args[0][2],"cdmetadl.ingestion.ingestion")
+
+    def test_hybrid_failure_reaches_notebook(self):
+        import cdmetadl.run as runner
+        with patch.object(runner,"FLAGS",self.options("fo_proto_lr_hybrid_ema_warmup",93)), patch.object(runner,"call",return_value=2) as call:
+            with self.assertRaises(SystemExit) as error:
+                runner.main([])
+            self.assertEqual(error.exception.code,2)
+            self.assertEqual(call.call_count,1)

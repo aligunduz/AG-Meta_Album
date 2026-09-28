@@ -24,8 +24,8 @@ of 300 tasks every 5,000, meta-batch 2, five inner steps, encoder/classifier LR
 0.01, Adam outer LR 0.001, clipping 10, 5-way 10-shot train and 5-shot validation.
 Existing baselines and `cdmetadl/ingestion/ingestion.py` remain unchanged.
 `experiment_ingestion.py` is a baseline-local copy of the ingestion protocol
-with actual-seed propagation and post-prediction logging hooks. The notebook
-wrapper selects it only for this hybrid baseline, then invokes normal scoring.
+with actual-seed propagation and post-prediction logging hooks. The existing `cdmetadl.run` CLI selects it only for this hybrid baseline,
+then invokes normal scoring. No Colab notebook edits or new arguments are needed.
 
 ## Exact computation and learning
 
@@ -87,30 +87,30 @@ exact data-order resume. Training checkpoints are trusted local pickle files.
 
 ## Running and outputs
 
-The previously referenced `run_baseline_experiment` wrapper and Drive copy code
-were not present in this checkout. `baseline_experiments.py` now provides:
+In the existing Colab notebook, change only:
 
 ```python
-from baseline_experiments import run_baseline_experiment
 BASELINE = "fo_proto_lr_hybrid_ema_warmup"
-# Execute only when you intend to run the experiment:
-run_baseline_experiment(baseline=BASELINE, input_data_dir="public_data",
-    output_dir="results/hybrid_seed_93", data_seed=93, model_seed=98,
-    drive_results_dir=None)
+DATA_SEED = 93  # Other data seeds are propagated into sampling and embedding metadata.
 ```
 
-Additional keyword arguments use the existing `cdmetadl.run` option names.
-For this baseline, the wrapper routes them to the local ingestion runner and
-standard scoring in separate checked subprocesses. A supplied Drive directory
-receives the complete output tree, including chunks. Use this wrapper for full
-metadata coverage: the unmodified competition runner cannot supply test task
-metadata or propagate a non-default data seed into the hybrid logs.
+The notebook's existing `run_baseline_experiment(...)` still calls
+`python -m cdmetadl.run` with its original options. The repository runner
+recognizes this submission directory and selects the local hybrid ingestion
+module. Other baseline directories retain their existing ingestion path.
+`cdmetadl/ingestion/ingestion.py` and the user's Colab notebook are unchanged.
+`baseline_experiments.py` remains an optional local convenience wrapper; Colab
+does not need to import or use it.
 
-Logs: `<ingestion output>/logs/embeddings/`. `run.json` describes the trained
-embedding source and config. `chunk-*.npz` stores float32 vectors plus int64
-record IDs; matching JSONL contains metadata, IDs and array row offsets. Chunks
-hold at most 64 tasks by default and flush at validation/phase completion.
-Each test task flushes because the local runner reloads the learner per task.
+Logs: `<ingestion output>/model/embeddings/`. The existing notebook already
+copies and adds the complete `model/` directory to its W&B artifact and Drive
+output, so all vectors and metadata are included without a new file-selection
+rule. On Drive they are under `<drive run>/model/embeddings/`.
+`run.json` describes the trained embedding source, actual seed, run name and
+config. `chunk-*.npz` stores float32 vectors plus int64 record IDs; matching
+JSONL contains metadata, IDs and array row offsets. Chunks hold at most 64 tasks
+by default and flush at validation/phase completion. Each test task flushes
+because the local runner reloads the learner per task.
 Record IDs continue across checkpoint reloads and distinguish repeated episodes.
 No whole run is held in memory; an interrupted process can lose its unflushed
 partial chunk. One writer per output directory is supported.
@@ -126,16 +126,20 @@ Test rows identify the selected best snapshot.
 Norms, pair distances/cosines, relative task–EMA distance, delta norm and
 per-task low-rank correction summaries are in JSONL. Norm denominators <=1e-12
 produce null cosine/ratio, with invalid counts; no epsilon hides the invalidity.
-Existing low-rank interval metrics retain their source implementation. W&B
-receives only interval scalar aggregates through the existing `log_metrics`
-frequency; full per-task vector coverage is independent of that frequency.
+Existing low-rank interval metrics retain their source implementation. Interval scalar summaries are emitted to `lrsg_metrics.jsonl` and stdout at
+the existing `log_metrics` frequency; full per-task vector coverage is independent
+of that frequency. The unchanged Colab notebook logs its standard accuracy/loss
+charts and includes these summary files plus full embeddings in the W&B artifact.
+Its stdout parser does not forward the new JSON embedding summaries to live W&B
+scalar charts. Those extra live charts require a parser change or an explicitly
+configured W&B child-process connection; neither is silently introduced here.
 Logging uses detached copies and no RNG. Disable with
 `embedding_logging.enabled=false` for controlled equivalence checks.
 
 ## Offline analysis
 
 ```bash
-python baselines/fo_proto_lr_hybrid_ema_warmup/analyze_embeddings.py results/hybrid_seed_93/ingestion/logs/embeddings --output embedding_analysis.json --seed 98 --max-tasks 512 --max-pairs 10000
+python baselines/fo_proto_lr_hybrid_ema_warmup/analyze_embeddings.py results/hybrid_seed_93/ingestion/model/embeddings --output embedding_analysis.json --seed 98 --max-tasks 512 --max-pairs 10000
 ```
 
 JSON output contains full-data task-embedding centers, mean norms and RMS

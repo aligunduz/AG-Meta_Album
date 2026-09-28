@@ -96,7 +96,7 @@ class Tests(unittest.TestCase):
             self.assertTrue(report["groups"]); self.assertTrue(report["ema_movement"])
     def test_checkpoint_and_resume(self):
         with tempfile.TemporaryDirectory() as d, patch.object(baseline,"make_encoder",side_effect=lambda args:Tiny()):
-            logger=SimpleNamespace(logs_dir=d,log=lambda *args,**kwargs:None)
+            logger=SimpleNamespace(logs_dir=str(Path(d)/"logs"),log=lambda *args,**kwargs:None)
             a=baseline.MyMetaLearner(2,2,logger)
             a.transport.complete_training_episode(torch.ones(512)); a.training_step=1
             a.resume_buffer=[torch.ones_like(p) for p in a.meta_parameters]
@@ -113,24 +113,32 @@ class Tests(unittest.TestCase):
     def test_training_validation_test_integration(self):
         with tempfile.TemporaryDirectory() as d, patch.object(baseline,"make_encoder",side_effect=lambda args:Tiny()), patch.object(baseline,"read_config",return_value=copy.deepcopy(self.cfg)):
             owner=baseline.MyMetaLearner(2,2,SimpleNamespace(logs_dir=str(Path(d)/"logs"),log=lambda *a,**k:None))
+            owner.set_run_context(data_seed=95)
             owner.config["experiment_config"].update(train_iterations=2,validate_every=2,validation_tasks=1)
             learner=owner.meta_fit(lambda count:iter([self.task]*count),lambda count:iter([self.task]*count))
             self.assertEqual(owner.transport.ema_completed_tasks.item(),2)
-            model_dir=Path(d)/"model"; model_dir.mkdir(); learner.save(model_dir)
+            model_dir=Path(d)/"model"; model_dir.mkdir(exist_ok=True); learner.save(model_dir)
             loaded=baseline.MyLearner(); loaded.load(model_dir)
             predictor=loaded.fit((*self.task.support_set,2,3))
             before=loaded.transport.m.clone()
             probabilities=predictor.predict(self.q)
             loaded.record_test_episode(self.task,probabilities,1)
             torch.testing.assert_close(before,loaded.transport.m)
-            rows=[json.loads(line) for f in (Path(d)/"logs"/"embeddings").glob("*.jsonl") for line in f.read_text().splitlines()]
+            rows=[json.loads(line) for f in (Path(d)/"model"/"embeddings").glob("*.jsonl") for line in f.read_text().splitlines()]
             self.assertEqual(sorted(r["phase"] for r in rows),["test","train","train","validation"])
             self.assertEqual(len({r["record_id"] for r in rows}),4)
+            self.assertTrue(all(r["data_seed"] == 95 for r in rows))
+            # The unchanged Colab notebook copies/artifacts the entire model directory.
+            import shutil
+            shutil.copytree(model_dir, Path(d)/"drive"/"model")
+            copied = Path(d)/"drive"/"model"/"embeddings"
+            self.assertEqual(len(list(copied.glob("*.npz"))),len(list((model_dir/"embeddings").glob("*.npz"))))
+            self.assertEqual(json.loads((copied/"run.json").read_text())["data_seed"],95)
             self.assertEqual([r["training_step"] for r in rows if r["phase"]=="test"],[2])
 
     def test_resume_matches_next_optimizer_update(self):
         with tempfile.TemporaryDirectory() as d, patch.object(baseline,"make_encoder",side_effect=lambda args:Tiny()):
-            logger=SimpleNamespace(logs_dir=d,log=lambda *a,**k:None)
+            logger=SimpleNamespace(logs_dir=str(Path(d)/"logs"),log=lambda *a,**k:None)
             a=baseline.MyMetaLearner(2,2,logger)
             def step(owner):
                 fast,z=adapt(owner.meta_learner,owner.weights,self.x,self.y,owner.params,2,owner.transport,return_task_embedding=True)
