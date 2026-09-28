@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "source": "https://meta-album.github.io/paper/Meta-Album.pdf#page=6",
+  "domains": {
+    "Large Animals": ["BRD", "DOG"],
+    "Small Animals": ["PLK", "INS_2"],
+    "Plants": ["FLW", "PLT_NET"],
+    "Plant Diseases": ["PLT_VIL", "MED_LF"],
+    "Microscopy": ["BCT", "PNU"],
+    "Remote Sensing": ["RESISC", "RSICB"],
+    "Vehicles": ["CRS", "APL"],
+    "Manufacturing": ["TEX", "TEX_DTD"],
+    "Human Actions": ["SPT", "ACT_40"],
+    "OCR": ["MD_MIX", "MD_5_BIS"]
+  },
+  "alias_rules": ["Exact ID", "Exact ID followed by _Mini", "Exact DOMAIN_ID.ID"],
+  "domain_ids": ["LR_AM", "SM_AM", "PLT", "PLT_DIS", "MCR", "REM_SEN", "VCL", "MNF", "HUM_ACT", "OCR"]
+}

@@ -1,0 +1,17 @@
+{
+  "method": "fo-proto-domain-ema-stage2",
+  "source_checkpoint": null,
+  "data_seed": 93,
+  "stage2_seed": null,
+  "validation_seed": null,
+  "test_seed": null,
+  "budget_per_domain": 1000,
+  "warmup_tasks": 100,
+  "warmup_alpha": 0.1,
+  "ema_alpha": 0.01,
+  "atol": 0.000001,
+  "rtol": 0.00001,
+  "source_provenance": null,
+  "bootstrap_seed": 2026,
+  "bootstrap_samples": 10000
+}
