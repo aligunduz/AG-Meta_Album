@@ -219,10 +219,10 @@ class ConditionControlTests(unittest.TestCase):
                              [g.clamp(-config["grad_clip"], config["grad_clip"]) for g in grads]))
             return grads
 
-        def observe_transport(name, gradient, conditioning):
+        def observe_transport(name, gradient, conditioning, *, gamma=1.0):
             self.assertIn(name, dict(model.named_parameters()))
             self.assertLessEqual(float(gradient.abs().max()), config["grad_clip"])
-            value = original_transport(name, gradient, conditioning)
+            value = original_transport(name, gradient, conditioning, gamma=gamma)
             transported.append(value.detach().clone())
             return value
 

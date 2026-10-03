@@ -201,8 +201,8 @@ class EvaluationTransport:
                     "Applied override differs from supplied coefficient")
         return delta_a, delta_c
 
-    def transport_gradient(self, name, gradient, conditioning):
-        transformed = self.transport.transport_gradient(name, gradient, conditioning)
+    def transport_gradient(self, name, gradient, conditioning, *, gamma=1.0):
+        transformed = self.transport.transport_gradient(name, gradient, conditioning, gamma=gamma)
         if self.diagnostics is not None:
             self.diagnostics.record(name, gradient, transformed)
         return transformed
@@ -215,7 +215,7 @@ def evaluate_task(learner, task, codec, conditioning_override=None, diagnostics=
     support, labels, _ = task.support_set
     fast = adapt(learner.learner, list(learner.learner.parameters()),
                  support.to(learner.dev), labels.to(learner.dev),
-                 learner.config["method_config"], task.num_ways, view)
+                 learner.config["method_config"], task.num_ways, view, phase="test")
     require(view.condition_calls == 1, "Missing task conditioning")
     probabilities = learner.learner.forward_weights(
         task.query_set[0].to(learner.dev), fast).softmax(1).cpu().numpy()

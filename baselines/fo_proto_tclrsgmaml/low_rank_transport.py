@@ -66,7 +66,7 @@ class LowRankTransport(nn.Module):
         self._sums = None
         self._count = 0
 
-    def transport_gradient(self, name, grad, conditioning=None):
+    def transport_gradient(self, name, grad, conditioning=None, *, gamma=1.0):
         # Explicitly stop support Hessians; retain the graph in logits/U/V.
         grad = grad.detach()
         if not self.enabled:
@@ -80,7 +80,8 @@ class LowRankTransport(nn.Module):
             projected = self.v[key].T @ matrix
             if key in delta_c:
                 projected = (1 + delta_c[key]).unsqueeze(1) * projected
-            correction = self.beta * (self.u[key] @ projected)
+            # Match the gamma sweep's beta scaling; leave scalar/head updates alone.
+            correction = (self.beta * gamma) * (self.u[key] @ projected)
             transformed = transformed + correction.reshape_as(grad)
             if self.training:
                 with torch.no_grad():

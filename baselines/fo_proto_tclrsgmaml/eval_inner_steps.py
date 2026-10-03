@@ -9,7 +9,8 @@ Run from the repository root, using the original run's data, seed and image size
         --reference_task_results /path/to/scoring_output/task_results.csv \
         --out_csv /path/to/lrtc_seed93_inner_steps.csv
 
-The saved checkpoint config is authoritative. Accuracies and adaptation gains
+The saved checkpoint config is authoritative except for the current evaluation
+gamma policy (see README). Accuracies and adaptation gains
 in CSV are fractions; summaries use percent and percentage points. All means
 weight tasks equally. Reference parity is required before interpreting the
 seed 93/94/95 experiments; omitting the reference explicitly leaves it UNVERIFIED.
@@ -36,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from model import MyLearner  # noqa: E402
-from helpers_fo_proto_tclrsgmaml import prototype_head  # noqa: E402
+from helpers_fo_proto_tclrsgmaml import adaptation_gamma, prototype_head  # noqa: E402
 from cdmetadl.helpers.general_helpers import prepare_datasets_information  # noqa: E402
 from cdmetadl.ingestion.image_dataset import create_datasets  # noqa: E402
 from cdmetadl.ingestion.data_generator import CompetitionDataLoader  # noqa: E402
@@ -135,7 +136,8 @@ def support_diagnostics(learner, support, labels, ways, adapted):
                 matrix = grad.reshape(grad.shape[0], -1)
                 projected = transport.v[key].T @ matrix
                 projected = (1 + conditioning[1][key]).unsqueeze(1) * projected
-                correction = transport.beta * (transport.u[key] @ projected)
+                gamma = adaptation_gamma(learner.config["method_config"], "test")
+                correction = (transport.beta * gamma) * (transport.u[key] @ projected)
                 correction_squared += correction.double().square().sum()
             correction_norm = correction_squared.sqrt().item()
             loss_after = F.cross_entropy(model.forward_weights(

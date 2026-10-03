@@ -8,8 +8,9 @@ gamma multiplies the saved ``lrsg.beta``, i.e. the WHOLE low-rank correction;
 ``delta_c`` and the scalar gates are untouched and classifier-head updates are
 not scaled. Reading the columns:
 
-* ``acc_gamma_1`` is the trained model and must reproduce the scorer's
-  ``task_results.csv`` (reference parity, abs_tol=1e-12).
+* ``acc_gamma_1`` is the legacy evaluation policy and must reproduce a legacy
+  gamma=1 scorer's ``task_results.csv`` (reference parity, abs_tol=1e-12).
+* ``acc_gamma_2`` matches the baseline's new default evaluation policy.
 * ``acc_gamma_0`` keeps the LRTC-trained encoder and its learned scalar gates
   and only switches the low-rank correction off. It is NOT FO-Proto-MAML.
 * ``acc_steps0`` is the prototype start of the same encoder (no adaptation).
@@ -130,9 +131,15 @@ def _evaluate_task(learner, task, task_id, gammas):
         row["acc_steps0"] = accuracy("steps0")
     finally:
         learner.config["method_config"] = original_config
-    for gamma in gammas:
-        with scaled_low_rank(learner.transport, gamma):
-            row[gamma_field(gamma)] = accuracy(f"gamma={gamma:g}")
+    try:
+        # This experiment already scales beta. Disable the normal evaluation
+        # multiplier so each requested gamma is applied exactly once.
+        learner.config["method_config"] = dict(original_config, eval_gamma=1.0)
+        for gamma in gammas:
+            with scaled_low_rank(learner.transport, gamma):
+                row[gamma_field(gamma)] = accuracy(f"gamma={gamma:g}")
+    finally:
+        learner.config["method_config"] = original_config
     return row
 
 

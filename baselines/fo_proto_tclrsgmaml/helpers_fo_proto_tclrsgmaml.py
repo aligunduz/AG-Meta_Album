@@ -3,6 +3,8 @@
 Only update gradients are stopped. The support-derived head stays connected
 to the original encoder throughout adaptation and the outer backward pass.
 """
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -19,8 +21,24 @@ def prototype_head(features, labels, num_classes=None):
     return 2 * prototypes, -prototypes.square().sum(-1)
 
 
+def adaptation_gamma(config, phase):
+    """Select by caller-supplied phase, including grad-enabled evaluation."""
+    if phase == "train":
+        key, default = "train_gamma", 1.0
+    elif phase in ("validation", "test"):
+        key, default = "eval_gamma", 2.0
+    else:
+        raise ValueError(f"Unknown adaptation phase: {phase!r}")
+    gamma = config.get(key, default)
+    if type(gamma) not in (int, float) or not math.isfinite(gamma) or gamma < 0:
+        raise ValueError(f"{key} must be finite and non-negative")
+    return float(gamma)
+
+
 @torch.enable_grad()
-def adapt(model, weights, support, labels, config, num_classes=None, transport=None):
+def adapt(model, weights, support, labels, config, num_classes=None, transport=None,
+          *, phase="train"):
+    gamma = adaptation_gamma(config, phase)
     if transport is not None and transport.names != [name for name, _ in model.named_parameters()]:
         raise ValueError("LRSG parameter names must match the encoder ordering")
     features = model.forward_weights(support, weights, embedding=True)
@@ -43,7 +61,7 @@ def adapt(model, weights, support, labels, config, num_classes=None, transport=N
         if transport is not None:
             # Transport owns only encoder parameters. Preserve both task-local
             # classifier gradients and their ordinary FO-Proto-MAML updates.
-            encoder_grads = [transport.transport_gradient(name, g, conditioning)
+            encoder_grads = [transport.transport_gradient(name, g, conditioning, gamma=gamma)
                              for name, g in zip(transport.names, grads[:len(weights)], strict=True)]
             grads = encoder_grads + list(grads[len(weights):])
         fast = [w - lr * g for w, lr, g in zip(fast, rates, grads, strict=True)]

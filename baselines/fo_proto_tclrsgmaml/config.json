@@ -32,6 +32,8 @@
     "task_conditioned_gate": true,
     "low_rank_transport": true,
     "reset_classifier": false,
+    "train_gamma": 1.0,
+    "eval_gamma": 2.0,
     "encoder_lr": 0.01,
     "classifier_lr": 0.01,
     "outer_lr": 0.001,

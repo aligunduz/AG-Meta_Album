@@ -122,8 +122,8 @@ class ResidualControl:
         return a.detach(), {key: value.detach() for key, value in c.items()}
 
     @torch.no_grad()
-    def transport_gradient(self, name, gradient, conditioning):
-        return self.transport.transport_gradient(name, gradient, conditioning)
+    def transport_gradient(self, name, gradient, conditioning, *, gamma=1.0):
+        return self.transport.transport_gradient(name, gradient, conditioning, gamma=gamma)
 
 
 def benefit(learner, support, labels, query, query_labels):
@@ -133,7 +133,7 @@ def benefit(learner, support, labels, query, query_labels):
         weights = [w.detach().clone().requires_grad_(True)
                    for w in learner.learner.parameters()]
         fast = adapt(learner.learner, weights, support, labels, cfg, WAYS,
-                     ResidualControl(learner.transport, residual_on))
+                     ResidualControl(learner.transport, residual_on), phase="test")
         with torch.no_grad():
             logits = learner.learner.forward_weights(query, fast)
             if not bool(torch.isfinite(logits).all()):

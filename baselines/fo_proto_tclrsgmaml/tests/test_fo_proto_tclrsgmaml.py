@@ -265,6 +265,8 @@ class TransportTests(unittest.TestCase):
         config.pop("task_conditioning")
         config["method"] = reference["method"]
         config["method_config"]["task_conditioned_gate"] = False
+        config["method_config"].pop("train_gamma")
+        config["method_config"].pop("eval_gamma")
         self.assertEqual(reference, config)
 
     def test_train_checkpoint_optimizer_and_architecture(self):

@@ -9,7 +9,7 @@ FO-Proto-TCSGMAML and FO-Proto-LRSGMAML files are unchanged.
 ```text
 G_matrix = stop_gradient(clipped_support_gradient).reshape(C_out, -1)
 G_tilde_tau = sigmoid(a + delta_a_tau) * G
-              + reshape(beta * U @ diag(1 + delta_c_tau) @ V.T @ G_matrix)
+              + reshape((beta * gamma) * U @ diag(1 + delta_c_tau) @ V.T @ G_matrix)
 theta_fast = theta_fast - inner_lr * G_tilde_tau
 ```
 
@@ -45,13 +45,14 @@ at 4 (sigmoid ≈ .982014), rank defaults to 4 and beta is fixed at 1. No L2,
 column, spectral normalization, orthogonalization or unit-norm constraint is
 applied to either U or V.
 
-The coefficient is **1 + delta_c**, not delta_c. Therefore zero residuals give
+The coefficient is **1 + delta_c**, not delta_c. At gamma=1, zero residuals give
 the original LRSG operator even with learned, nonzero U/V. CPU float64 tests
 confirm bitwise-identical fast weights, query logits and encoder outer
 gradients against the current LRSG helper, both at initialization and with
-nonzero U. No behavior outside task conditioning is changed: backbone, rank,
+nonzero U. Backbone, rank,
 U/V initialization, optimizer, learning rates, clipping, seeds, data and
-training/validation/test protocols and best-checkpoint selection are retained.
+episode protocols are retained. Validation/test now scale the correction with
+gamma=2 by default, including validation used for best-checkpoint selection.
 
 Support autograd uses `create_graph=False, retain_graph=True`; transport
 explicitly detaches G. Thus support Hessians are absent while query loss
@@ -64,8 +65,8 @@ U and scalar outputs learn first; subsequent steps activate the other paths.
 
 ## Configuration and checkpoint
 
-`config.json` copies LRSG's complete feedback config. Only the method name,
-task-conditioned flag and this section differ:
+`config.json` copies LRSG's complete feedback config. The method name,
+task-conditioned flag, train/eval gamma controls and this section differ:
 
 ```json
 "task_conditioning": {
@@ -126,6 +127,27 @@ independent of U and V. Inspect mean, std and task-to-task variation alongside
 also reflect outer parameter updates, not only differences between tasks.
 
 ## Run and verify
+
+`method_config.train_gamma` defaults to **1**, and `method_config.eval_gamma`
+defaults to **2** for both validation and test, with one value across all
+shot/way conditions. After support-gradient clipping, the encoder gradient is
+`sigmoid(a + delta_a) * G + (beta * gamma) * U diag(1 + delta_c) V^T G`.
+Only the whole low-rank correction is scaled, exactly as in `eval_beta_sweep.py`;
+encoder/classifier learning rates, scalar gates and head updates stay unchanged.
+The sweep temporarily uses `eval_gamma=1` while scaling beta, avoiding double scaling.
+
+Existing `max-va.pth` checkpoints need no retraining or tensor conversion. Missing
+gamma fields in old configs default to train=1/eval=2. On checkpoint loading,
+evaluation uses this baseline's current `config.json` `method_config.eval_gamma`
+(or 2 if missing), overriding any saved evaluation gamma; other saved adaptation
+settings remain authoritative. Set that field to **1** to restore legacy evaluation,
+or use `MyLearner.load(path, eval_gamma=1)` / `test.py --eval_gamma=1`.
+Future best-checkpoint selection uses validation with eval gamma (2 by default).
+The existing Colab `run_baseline_experiment(...)` / `cdmetadl.run` call needs no
+new arguments. Gamma-sweep reference CSVs still refer to legacy gamma=1 results.
+
+Quick synthetic CPU checks (no dataset training or W&B run):
+`python -B -m unittest discover -s baselines/fo_proto_tclrsgmaml/tests -p test_gamma_policy.py -v`.
 
 ```bash
 python -u -m cdmetadl.run \

@@ -1,4 +1,5 @@
 """Independent FO-Proto-TCLRSGMAML submission using the repository FOMAML protocol."""
+import copy
 import json
 import random
 from pathlib import Path
@@ -9,7 +10,7 @@ from torch import nn
 
 from api import MetaLearner, Learner, Predictor
 from network import ResNet
-from helpers_fo_proto_tclrsgmaml import adapt, query_loss
+from helpers_fo_proto_tclrsgmaml import adapt, adaptation_gamma, query_loss
 from task_transport import TaskConditionedTransport
 from metrics import log_metrics
 
@@ -24,11 +25,21 @@ if torch.cuda.is_available():
 
 
 def read_config():
-    return json.loads(Path(__file__).with_name("config.json").read_text())
+    return gamma_defaults(json.loads(Path(__file__).with_name("config.json").read_text()))
+
+
+def gamma_defaults(config):
+    """Upgrade config only; keep checkpoint tensors and transport architecture intact."""
+    config = copy.deepcopy(config)
+    config["method_config"].setdefault("train_gamma", 1.0)
+    config["method_config"].setdefault("eval_gamma", 2.0)
+    return config
 
 
 def validate_config(config):
     method = config["method_config"]
+    adaptation_gamma(method, "train")
+    adaptation_gamma(method, "validation")
     if config["method"] != "fo-proto-tclrsgmaml" or method["first_order"] is not True:
         raise ValueError("This baseline requires fo-proto-tclrsgmaml and first_order=true")
     for key in ("reset_classifier",):
@@ -85,7 +96,8 @@ class MyMetaLearner(MetaLearner):
             support, labels, _ = task.support_set
             query, targets, _ = task.query_set
             fast = adapt(self.meta_learner, self.weights, support.to(self.dev),
-                         labels.to(self.dev), self.params, task.num_ways, self.transport)
+                         labels.to(self.dev), self.params, task.num_ways, self.transport,
+                         phase="train")
             out, loss = query_loss(self.meta_learner, fast, query.to(self.dev),
                                    targets.to(self.dev))
             loss.backward()
@@ -124,7 +136,8 @@ class MyMetaLearner(MetaLearner):
             support, labels, _ = task.support_set
             query, targets, _ = task.query_set
             fast = adapt(self.meta_learner, self.weights, support.to(self.dev),
-                         labels.to(self.dev), self.params, task.num_ways, self.transport)
+                         labels.to(self.dev), self.params, task.num_ways, self.transport,
+                         phase="validation")
             out, _ = query_loss(self.meta_learner, fast, query.to(self.dev),
                                 targets.to(self.dev))
             correct += (out.argmax(1).cpu() == targets.cpu()).sum().item()
@@ -147,6 +160,7 @@ class MyLearner(Learner):
             self._initialize()
 
     def _initialize(self):
+        self.config = gamma_defaults(self.config)
         validate_config(self.config)
         self.dev = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.model_args = dict(self.model_args, dev=self.dev)
@@ -163,7 +177,7 @@ class MyLearner(Learner):
         support, labels, _, ways, _ = support_set
         fast = adapt(self.learner, list(self.learner.parameters()),
                      support.to(self.dev), labels.to(self.dev),
-                     self.config["method_config"], ways, self.transport)
+                     self.config["method_config"], ways, self.transport, phase="test")
         return MyPredictor(self.learner, fast, self.dev)
 
     def save(self, path_to_save):
@@ -175,7 +189,7 @@ class MyLearner(Learner):
                         state=self.state, best_validation_accuracy=self.best_score),
                    path / "max-va.pth")
 
-    def load(self, path_to_load):
+    def load(self, path_to_load, *, eval_gamma=None):
         path = Path(path_to_load)
         checkpoint = path / "max-va.pth" if path.is_dir() else path
         if checkpoint.name != "max-va.pth":
@@ -184,7 +198,12 @@ class MyLearner(Learner):
         if data["method"] != "fo-proto-tclrsgmaml" or data["format_version"] != 1:
             raise ValueError("Unsupported FO-Proto-TCLRSGMAML checkpoint")
         self.model_args, self.state = data["model_args"], data["state"]
-        self.config = data["config"]
+        self.config = gamma_defaults(data["config"])
+        # Evaluation policy belongs to this run, not the checkpoint's training
+        # config. Only evaluation gamma overrides saved adaptation settings.
+        self.config["method_config"]["eval_gamma"] = (
+            read_config()["method_config"].get("eval_gamma", 2.0)
+            if eval_gamma is None else eval_gamma)
         self.best_score = data["best_validation_accuracy"]
         self._initialize()
 

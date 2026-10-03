@@ -18,9 +18,11 @@ def main():
     parser.add_argument("--seed", type=int, default=93)
     parser.add_argument("--image_size", type=int, default=128)
     parser.add_argument("--test_tasks_per_dataset", type=int, default=100)
+    parser.add_argument("--eval_gamma", type=float, default=None,
+                        help="Low-rank correction scale (default: config eval_gamma or 2; legacy: 1)")
     args = parser.parse_args()
     learner = MyLearner()
-    learner.load(args.checkpoint)
+    learner.load(args.checkpoint, eval_gamma=args.eval_gamma)
     _, _, info = prepare_datasets_information(
         args.input_data_dir, learner.config["validation_datasets"], args.seed, False)
     loader = CompetitionDataLoader(

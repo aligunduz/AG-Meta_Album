@@ -41,7 +41,7 @@ class BetaSweepTests(unittest.TestCase):
         config["task_conditioning"]["scalar_delta_scale"] = 0.0
         config["lrsg"]["beta"] = 0.75  # gamma must multiply the SAVED beta, not replace it
         config["method_config"].update(inner_steps=5, encoder_lr=.07,
-                                       classifier_lr=.13, grad_clip=.005)
+                                       classifier_lr=.13, grad_clip=.005, eval_gamma=1.0)
         model = Tiny().double().eval()
         transport = TaskConditionedTransport(model, config).eval()
         with torch.no_grad():
@@ -246,7 +246,7 @@ class BetaSweepTests(unittest.TestCase):
                 self.fail("nonfinite gamma accepted")
         self.assertEqual(self.learner.transport.beta, .75)
 
-    def test_real_resnet_functional_batchnorm_and_gamma_one_reload_parity(self):
+    def test_real_resnet_functional_batchnorm_and_gamma_two_reload_parity(self):
         config = copy.deepcopy(self.learner.config)
         config["method_config"]["inner_steps"] = 1
         args = dict(num_classes=2, dev="cpu", num_blocks=18, pretrained=False)
@@ -255,6 +255,7 @@ class BetaSweepTests(unittest.TestCase):
         with torch.no_grad():
             for u in transport.u.values():
                 u.normal_(0, .01)
+        config["method_config"]["eval_gamma"] = 2.0
         learner = baseline.MyLearner(args, baseline.snapshot(encoder, transport), config, .5)
         task = SimpleNamespace(support_set=(torch.randn(2, 3, 32, 32), torch.tensor([0, 1]), None),
                                query_set=(torch.randn(4, 3, 32, 32), torch.tensor([0, 1, 0, 1]), None),
@@ -265,7 +266,7 @@ class BetaSweepTests(unittest.TestCase):
         with patch.object(learner, "fit", wraps=learner.fit) as fit:
             row = sweep.evaluate_task(learner, task, 1, (0., 1., 2.))
         self.assertEqual(fit.call_count, 4)
-        self.assertEqual(row["acc_gamma_1"], sweep.scorer_accuracy(probabilities, task.query_set[1].numpy()))
+        self.assertEqual(row["acc_gamma_2"], sweep.scorer_accuracy(probabilities, task.query_set[1].numpy()))
         # Reusing the loaded encoder is equivalent to ingestion's fresh load.
         with tempfile.TemporaryDirectory() as directory:
             learner.save(directory)

@@ -91,8 +91,8 @@ class InnerStepsTests(unittest.TestCase):
                 raw.extend(g.detach().clone() for g in result[:-2])
             return result
 
-        def observe_transport(name, g, conditioning):
-            result = original_transport(name, g, conditioning)
+        def observe_transport(name, g, conditioning, *, gamma=1.0):
+            result = original_transport(name, g, conditioning, gamma=gamma)
             if len(clipped) < len(self.learner.transport.names):
                 clipped.append(g.detach().clone())
                 key = self.learner.transport.indices[name]
