@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from helpers_fo_proto_tclrsgmaml import adapt, prototype_head
+from helpers_fo_proto_tclrsgmaml import adapt, adaptation_gamma, prototype_head
 from eval_inner_steps import validate_checkpoint_config, observational_diagnostics
 from cdmetadl.helpers.general_helpers import prepare_datasets_information
 from cdmetadl.ingestion.image_dataset import create_datasets
@@ -126,14 +126,15 @@ class ResidualControl:
         return self.transport.transport_gradient(name, gradient, conditioning, gamma=gamma)
 
 
-def benefit(learner, support, labels, query, query_labels):
+def benefit(learner, support, labels, query, query_labels, *, gamma=None):
     scores = {}
     cfg = dict(learner.config["method_config"], inner_steps=STEPS)
+    cfg["eval_gamma"] = adaptation_gamma(cfg, "validation") if gamma is None else gamma
     for mode, residual_on in (("lr_on", True), ("lr_off", False)):
         weights = [w.detach().clone().requires_grad_(True)
                    for w in learner.learner.parameters()]
         fast = adapt(learner.learner, weights, support, labels, cfg, WAYS,
-                     ResidualControl(learner.transport, residual_on), phase="test")
+                     ResidualControl(learner.transport, residual_on), phase="validation")
         with torch.no_grad():
             logits = learner.learner.forward_weights(query, fast)
             if not bool(torch.isfinite(logits).all()):
@@ -149,14 +150,14 @@ def benefit(learner, support, labels, query, query_labels):
 
 
 @torch.no_grad()
-def pair_measurements(transport, ga, gb, ca, cb, floor):
+def pair_measurements(transport, ga, gb, ca, cb, floor, *, gamma):
     rows = []
     for name, a, b in zip(transport.names, ga, gb, strict=True):
         mean, disagreement = (a + b) / 2, (a - b) / 2
         raw_d, raw_m = energy(disagreement), energy(mean)
         # This separately measures the complete support-dependent system.
-        pa = transport.transport_gradient(name, a, ca)
-        pb = transport.transport_gradient(name, b, cb)
+        pa = transport.transport_gradient(name, a, ca, gamma=gamma)
+        pb = transport.transport_gradient(name, b, cb, gamma=gamma)
         system_d = energy((pa.double() - pb.double()) / 2)
         system_m = energy((pa.double() + pb.double()) / 2)
         system_difference = energy(pa.double() - pb.double())
@@ -164,8 +165,8 @@ def pair_measurements(transport, ga, gb, ca, cb, floor):
         rs, rs_status = ratio(system_d, system_m, floor)
         for label, condition in (("A", ca), ("B", cb)):
             # Frozen P applied to BOTH coordinates; no dense P is constructed.
-            pd = transport.transport_gradient(name, disagreement, condition)
-            pm = transport.transport_gradient(name, mean, condition)
+            pd = transport.transport_gradient(name, disagreement, condition, gamma=gamma)
+            pm = transport.transport_gradient(name, mean, condition, gamma=gamma)
             fixed_d, fixed_m = energy(pd), energy(pm)
             rp, rp_status = ratio(fixed_d, fixed_m, floor)
             amplification, amp_status = None, "invalid_r0_or_rP"
@@ -264,6 +265,7 @@ def load_set(dataset, selected, classes):
 
 
 def evaluate_task(learner, dataset, task, floor):
+    gamma = adaptation_gamma(learner.config["method_config"], "validation")
     # Load every image before computing: a read failure excludes the entire task.
     q, qy = load_set(dataset, task["query"], task["class_ids"])
     supports = [(pair, {s: load_set(dataset, pair[s], task["class_ids"]) for s in ("A", "B")})
@@ -276,9 +278,10 @@ def evaluate_task(learner, dataset, task, floor):
         for s in ("A", "B"):
             x, y = (t.to(learner.dev) for t in sets[s])
             gradients[s], conditions[s] = first_gradients(learner, x, y)
-            score_rows.append(dict(common, support=s, **benefit(learner, x, y, q, qy)))
+            score_rows.append(dict(common, support=s, **benefit(learner, x, y, q, qy, gamma=gamma)))
         layer_rows.extend(dict(common, **row) for row in pair_measurements(
-            learner.transport, gradients["A"], gradients["B"], conditions["A"], conditions["B"], floor))
+            learner.transport, gradients["A"], gradients["B"], conditions["A"], conditions["B"],
+            floor, gamma=gamma))
     task_row = dict(task_id=task["task_id"], dataset=task["dataset"],
                     num_pairs=len(task["pairs"]), num_support_evaluations=len(score_rows),
                     **{key: average([r[key] for r in score_rows]) for key in BENEFITS})
@@ -421,6 +424,7 @@ def main(argv=None):
     manifest = make_manifest(datasets, pools, args.num_tasks, args.num_repeats, args.sampling_seed)
     metadata = dict(status="running", checkpoint=str(checkpoint), checkpoint_sha256=digest_file(checkpoint),
         checkpoint_config=config_before, architecture=learner.transport.architecture(),
+        eval_gamma=adaptation_gamma(learner.config["method_config"], "validation"),
         best_validation_accuracy=learner.best_score, cli=vars(args), device=str(learner.dev),
         torch_version=str(torch.__version__), numpy_version=np.__version__,
         data_seed_source=("checked against saved config data_seed" if seed_evidence else

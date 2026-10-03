@@ -320,7 +320,14 @@ class InnerStepsTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            self.learner.save(root)
+            # A saved evaluation gamma=1 must yield to the current gamma=2 policy.
+            current_method = self.learner.config["method_config"]
+            try:
+                self.learner.config["method_config"] = dict(current_method, eval_gamma=1)
+                self.learner.save(root)
+            finally:
+                self.learner.config["method_config"] = current_method
+            runtime_config = baseline.read_config()
             for seed in (93, 94, 95):
                 tasks = list(self.tasks(seed))
                 again = list(self.tasks(seed))
@@ -333,12 +340,13 @@ class InnerStepsTests(unittest.TestCase):
                 out = root / f"diagnostic_{seed}.csv"
                 stdout = io.StringIO()
                 with patch.object(baseline, "make_encoder", side_effect=tiny_encoder), \
-                        patch.object(baseline, "read_config", side_effect=AssertionError("Repository config read")), \
+                        patch.object(baseline, "read_config", return_value=runtime_config) as read_config, \
                         patch.object(diagnostic, "prepare_datasets_information", return_value=(None, None, {"test": 1})) as prepare, \
                         patch.object(diagnostic, "create_datasets", return_value=self.datasets), redirect_stdout(stdout):
                     diagnostic.main(["--checkpoint", str(root / "max-va.pth"), "--input_data_dir", "synthetic",
                                      "--out_csv", str(out), "--seed", str(seed), "--test_tasks_per_dataset", "2",
                                      "--reference_task_results", str(reference)])
+                read_config.assert_called_once_with()
                 prepare.assert_called_once_with("synthetic", self.learner.config["validation_datasets"], seed, False)
                 self.assertIn("Reference parity PASSED: 4 tasks", stdout.getvalue())
                 with out.open() as handle:

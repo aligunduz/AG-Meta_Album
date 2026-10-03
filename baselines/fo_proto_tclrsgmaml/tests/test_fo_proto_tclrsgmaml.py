@@ -224,12 +224,18 @@ class TransportTests(unittest.TestCase):
         self.assertTrue(all(p.grad is not None for p in self.transport.parameters()))
         self.assertGreater(self.transport.u["0"].grad.norm().item(), 0)
         self.assertEqual(self.transport.v["0"].grad.norm().item(), 0)
-        self.assertGreater(self.transport.gate_net.out.weight.grad[:2].norm().item(), 0)
+        scalar_count = len(self.transport.names)
+        self.assertEqual(self.transport.scalar_scale, 0)
+        self.assertEqual(self.transport.gate_net.out.weight.grad[:scalar_count].norm().item(), 0)
+        self.assertEqual(self.transport.gate_net.out.bias.grad[:scalar_count].norm().item(), 0)
+        self.assertEqual(self.transport.gate_net.out.weight.grad[scalar_count:].norm().item(), 0)
+        self.assertTrue(all(p.grad.norm().item() > 0 for p in self.transport.logits.parameters()))
         torch.optim.SGD(self.transport.parameters(), lr=.1).step()
         self.transport.zero_grad()
         helpers.query_loss(self.model, self.adapt(), self.query, self.y)[1].backward()
         self.assertGreater(self.transport.v["0"].grad.norm().item(), 0)
-        self.assertGreater(self.transport.gate_net.out.weight.grad[2:].norm().item(), 0)
+        self.assertEqual(self.transport.gate_net.out.weight.grad[:scalar_count].norm().item(), 0)
+        self.assertGreater(self.transport.gate_net.out.weight.grad[scalar_count:].norm().item(), 0)
 
     def test_variable_way_no_grad_eval_uses_learned_conditioning(self):
         with torch.no_grad():

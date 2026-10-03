@@ -27,7 +27,7 @@ from eval_gradient_reliability import (
     digest_file, frozen_condition, load_set, sample_set, write_csv,
 )
 from eval_inner_steps import observational_diagnostics, validate_checkpoint_config
-from helpers_fo_proto_tclrsgmaml import prototype_head
+from helpers_fo_proto_tclrsgmaml import adaptation_gamma, prototype_head
 from cdmetadl.helpers.general_helpers import prepare_datasets_information
 from cdmetadl.ingestion.image_dataset import create_datasets
 from model import MyLearner
@@ -112,14 +112,14 @@ def initial_gradients(learner, support, labels, query, query_labels):
 
 
 @torch.no_grad()
-def alignment(transport, gs, gq, condition, min_norm):
+def alignment(transport, gs, gq, condition, min_norm, *, gamma):
     # Same residual-off mechanism as reliability.ResidualControl: only (1+c)=0.
     base_condition = (condition[0], {key: -torch.ones_like(value) for key, value in condition[1].items()})
     totals = torch.zeros(7, dtype=torch.float64, device=gs[0].device)
     rows = []
     for name, support_grad, query_grad in zip(transport.names, gs, gq, strict=True):
-        base = transport.transport_gradient(name, support_grad, base_condition)
-        full = transport.transport_gradient(name, support_grad, condition)
+        base = transport.transport_gradient(name, support_grad, base_condition, gamma=gamma)
+        full = transport.transport_gradient(name, support_grad, condition, gamma=gamma)
         directions = [support_grad.double(), base.double(), full.double()]
         q = query_grad.double()
         moments = torch.stack([g.square().sum() for g in directions] + [q.square().sum()]
@@ -176,6 +176,7 @@ def make_manifest(datasets, pools, num_tasks, num_repeats, shots, seed):
 
 
 def evaluate_task(learner, dataset, task, shots, min_norm):
+    gamma = adaptation_gamma(learner.config["method_config"], "validation")
     # Preload all selected images so I/O errors exclude the whole task, all shots.
     query, query_labels = load_set(dataset, task["query"], task["class_ids"])
     supports = [load_set(dataset, repeat["support10"], task["class_ids"]) for repeat in task["repeats"]]
@@ -187,11 +188,11 @@ def evaluate_task(learner, dataset, task, shots, min_norm):
             support, sy = images[positions].to(learner.dev), labels[positions].to(learner.dev)
             ids = dict(task_id=task["task_id"], dataset=task["dataset"], shot=shot, repeat_id=repeat["repeat_id"])
             gs, gq, condition, losses = initial_gradients(learner, support, sy, query, query_labels)
-            whole, tensors = alignment(learner.transport, gs, gq, condition, min_norm)
+            whole, tensors = alignment(learner.transport, gs, gq, condition, min_norm, gamma=gamma)
             del gs, gq, condition
             # Each evaluation starts from checkpoint coordinates again, through
             # unchanged adapt(); the measured query gradient never enters updates.
-            gains = benefit(learner, support, sy, query, query_labels)
+            gains = benefit(learner, support, sy, query, query_labels, gamma=gamma)
             repeat_rows.append(dict(ids, encoder_tensors=len(tensors),
                 low_rank_tensors=sum(row["has_low_rank"] for row in tensors), **whole, **losses, **gains))
             tensor_rows.extend(dict(ids, **row) for row in tensors)
@@ -328,6 +329,7 @@ def main(argv=None):
         checkpoint = checkpoint / "max-va.pth"
     metadata = dict(status="running", cli=vars(args), checkpoint=str(checkpoint),
         checkpoint_sha256=digest_file(checkpoint), checkpoint_config=original_config,
+        eval_gamma=adaptation_gamma(learner.config["method_config"], "validation"),
         architecture=learner.transport.architecture(), best_validation_accuracy=learner.best_score,
         device=str(learner.dev), torch_version=str(torch.__version__), numpy_version=np.__version__,
         data_seed_source="checked against saved config" if saved_seed else "user supplied from training log; not saved in checkpoint",

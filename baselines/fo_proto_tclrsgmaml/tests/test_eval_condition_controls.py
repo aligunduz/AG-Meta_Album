@@ -159,10 +159,11 @@ class ConditionControlTests(unittest.TestCase):
         original = transport.transport_gradient
         seen = []
 
-        def observe(name, gradient, conditioning):
+        def observe(name, gradient, conditioning, *, gamma):
             self.assertEqual(int(conditioning[0].count_nonzero()), 0)
+            self.assertEqual(gamma, self.config["method_config"]["eval_gamma"])
             seen.append(self.codec.flatten(conditioning[1]))
-            return original(name, gradient, conditioning)
+            return original(name, gradient, conditioning, gamma=gamma)
 
         with patch.object(transport.gate_net, "forward", side_effect=AssertionError("GateNet override leak")), \
                 patch.object(transport, "transport_gradient", side_effect=observe):

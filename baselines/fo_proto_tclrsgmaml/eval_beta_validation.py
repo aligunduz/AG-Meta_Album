@@ -25,6 +25,7 @@ is a pilot; repeat with checkpoints/data seeds 97 and 101 before fixing gamma.
 """
 import argparse
 from collections import Counter
+import copy
 import csv
 from datetime import datetime, timezone
 import hashlib
@@ -79,6 +80,24 @@ def check_recreated_split(infos, metadata):
     for info, field in zip(infos, fields):
         if set(info) != set(metadata[field]):
             raise ValueError(f"Recreated {field} differs from the original run")
+
+
+def check_run_config(loaded_config, original_config):
+    """Allow only gamma defaults and the documented runtime eval-gamma override."""
+    from helpers_fo_proto_tclrsgmaml import adaptation_gamma
+
+    def normalized(config):
+        config = copy.deepcopy(config)
+        method = config["method_config"]
+        # Training gamma is saved policy: missing means 1, never ignore a change.
+        method["train_gamma"] = adaptation_gamma(method, "train")
+        # Evaluation gamma may be overridden at load; validate before ignoring it.
+        adaptation_gamma(method, "validation")
+        method.pop("eval_gamma", None)
+        return config
+
+    if normalized(loaded_config) != normalized(original_config):
+        raise ValueError("Loaded checkpoint config differs from the original run metadata")
 
 
 def summarize(rows):
@@ -155,8 +174,7 @@ def main(argv=None):
     learner = MyLearner()
     learner.load(args.checkpoint)
     validate_checkpoint_config(learner.config)
-    if learner.config != metadata["baseline_config"]:
-        raise ValueError("Loaded checkpoint config differs from the original run metadata")
+    check_run_config(learner.config, metadata["baseline_config"])
     infos = prepare_datasets_information(args.input_data_dir,
                                          learner.config["validation_datasets"], args.seed, False)
     check_recreated_split(infos, metadata)
