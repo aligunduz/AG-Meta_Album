@@ -155,7 +155,62 @@ class DirectionMagnitudeTests(unittest.TestCase):
         self.assertAlmostEqual(statistics["norm_ratio_step1"], norm(pg) / norm(g), places=9)
         self.assertAlmostEqual(statistics["cos_g_pg_step1"], cosine(g, pg), places=9)
         self.assertGreater(statistics["support_loss_start"], 0.0)
+        self.assertEqual(statistics["zero_gradient_step1"], 0)
+        self.assertEqual(tuple(statistics), decomposition.STEP1_FIELDS)
         self.assertIsNone(self.variant("plain", steps=1)[1])
+
+    def test_zero_first_step_gradient_is_flagged_and_left_out_of_the_means(self):
+        loss = torch.tensor(0.25, dtype=torch.float64)
+        zero = [torch.zeros(4, 3, dtype=torch.float64), torch.zeros(4, dtype=torch.float64)]
+        some = [torch.ones(4, 3, dtype=torch.float64), torch.ones(4, dtype=torch.float64)]
+        undefined = decomposition.first_step_statistics(loss, zero, zero)
+        self.assertEqual(undefined, dict(support_loss_start=.25, zero_gradient_step1=1,
+                                         norm_ratio_step1=None, cos_g_pg_step1=None))
+        # A nonzero gradient that is transported to zero has ratio 0 but no direction.
+        self.assertEqual(decomposition.first_step_statistics(loss, some, zero),
+                         dict(support_loss_start=.25, zero_gradient_step1=0,
+                              norm_ratio_step1=0.0, cos_g_pg_step1=None))
+        defined = decomposition.first_step_statistics(loss, some, [3 * g for g in some])
+        self.assertEqual(defined["zero_gradient_step1"], 0)
+        self.assertAlmostEqual(defined["norm_ratio_step1"], 3.0, places=12)
+        self.assertAlmostEqual(defined["cos_g_pg_step1"], 1.0, places=12)
+
+        # grad_clip=0 zeroes every update gradient: nothing adapts, nothing is defined.
+        self.learner.config["method_config"]["grad_clip"] = 0
+        row = decomposition.evaluate_task(self.learner, self.task, 1, 1.0, check=True)
+        row.pop("_self_check_max_abs_diff")
+        self.assertEqual((row["zero_gradient_step1"], row["norm_ratio_step1"],
+                          row["cos_g_pg_step1"]), (1, None, None))
+        self.assertGreater(row["support_loss_start"], 0.0)
+        for name in decomposition.VARIANTS:
+            self.assertEqual(row[f"acc_{name}"], row["acc_steps0"])
+        with io.StringIO() as handle:
+            writer = csv.DictWriter(handle, fieldnames=decomposition.FIELDS)
+            writer.writeheader()
+            writer.writerow(row)
+            written = next(csv.DictReader(io.StringIO(handle.getvalue())))
+        self.assertEqual((written["zero_gradient_step1"], written["norm_ratio_step1"],
+                          written["cos_g_pg_step1"]), ("1", "", ""))
+
+        # Means: one undefined task must not pull the ratio/cosine towards zero.
+        valid = dict(row, zero_gradient_step1=0, norm_ratio_step1=200.0, cos_g_pg_step1=.02)
+        sums = decomposition.defaultdict(lambda: decomposition.defaultdict(float))
+        decomposition.accumulate(sums, ("ALL", "1"), row)
+        decomposition.accumulate(sums, ("ALL", "11-20"), valid)
+        self.assertEqual((sums["ALL"]["n"], sums["ALL"]["n_acc_full"],
+                          sums["ALL"]["n_norm_ratio_step1"], sums["ALL"]["n_cos_g_pg_step1"]),
+                         (2, 2, 1, 1))
+        self.assertEqual(sums["ALL"]["norm_ratio_step1"], 200.0)
+        self.assertEqual(sums["ALL"]["zero_gradient_step1"], 1)
+        stdout = io.StringIO()
+        with redirect_stdout(stdout):
+            decomposition.print_summary(sums)
+        tables = stdout.getvalue().split("Shared first step.")[1].splitlines()
+        cells = {line.split()[0]: line.split()[1:] for line in tables[2:6] if line.strip()}
+        loss_text = f"{row['support_loss_start']:.4g}"
+        self.assertEqual(cells["ALL"], [loss_text, "50.00", "200", "0.02", "1"])
+        self.assertEqual(cells["1"], [loss_text, "100.00", "n/a", "n/a", "0"])
+        self.assertEqual(cells["11-20"], [loss_text, "0.00", "200", "0.02", "1"])
 
     def test_row_fields_and_gamma_reach_only_the_transported_variants(self):
         row = decomposition.evaluate_task(self.learner, self.task, 1, 1.0, check=True)
@@ -285,7 +340,19 @@ class DirectionMagnitudeTests(unittest.TestCase):
         for a, e in zip(fast, normal.weights):
             torch.testing.assert_close(a, e.detach(), rtol=0, atol=0)
         self.assertGreater(statistics["support_loss_start"], 0.0)
+        self.assertEqual(statistics["zero_gradient_step1"], 0)
         self.assertGreater(statistics["norm_ratio_step1"], 0.0)
+        self.assertLessEqual(abs(statistics["cos_g_pg_step1"]), 1.0 + 1e-9)
+        # The realistic zero-gradient case: the prototype start separates distinct
+        # random images perfectly, so the support loss and its gradient are exactly 0.
+        separable = SimpleNamespace(
+            support_set=(torch.randn(4, 3, 32, 32), torch.tensor([0, 1, 0, 1]), None),
+            query_set=task.query_set, num_ways=2, num_shots=2, dataset="SYNTHETIC_RESNET")
+        fitted = decomposition.evaluate_task(learner, separable, 2, 1.0, check=True)
+        self.assertEqual((fitted["support_loss_start"], fitted["zero_gradient_step1"],
+                          fitted["norm_ratio_step1"], fitted["cos_g_pg_step1"]),
+                         (0.0, 1, None, None))
+        self.assertEqual(sum(fitted[f] for f in decomposition.DIVERGED_FIELDS), 0)
         plain = decomposition.adapt_variant(
             learner, task.support_set[0], task.support_set[1], 2, "plain", 1.0)[0]
         self.assertFalse(torch.equal(plain[0], fast[0]))

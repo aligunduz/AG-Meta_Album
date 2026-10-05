@@ -37,8 +37,14 @@ The five counterfactual variants may diverge. A variant with nonfinite support
 loss or nonfinite query predictions is scored with uniform probabilities (the
 scorer's first-index tie rule, i.e. chance level on balanced queries) and
 flagged in ``diverged_<variant>``. Nonfinite ``steps0``/``full`` predictions
-are an error. ``support_loss_start``, ``norm_ratio_step1`` (|Pg| / |g|) and
-``cos_g_pg_step1`` describe the shared first step.
+are an error.
+
+``support_loss_start``, ``norm_ratio_step1`` (|Pg| / |g|) and ``cos_g_pg_step1``
+describe the shared first step. When the clipped encoder gradient of that step
+is exactly zero (the prototype start already fits the support, typical at
+1 shot), ``zero_gradient_step1`` is 1 and the ratio and cosine are undefined:
+their CSV cells are left empty and the printed means use the defined tasks only.
+Accuracy columns always cover all tasks.
 
 Run from the repository root, using the original run's data, seed and image size::
 
@@ -79,7 +85,8 @@ from cdmetadl.ingestion.data_generator import CompetitionDataLoader  # noqa: E40
 
 VARIANTS = ("plain", "mag_layer", "mag_global", "dir_layer", "dir_global", "full")
 COUNTERFACTUALS = VARIANTS[:-1]
-STEP1_FIELDS = ("support_loss_start", "norm_ratio_step1", "cos_g_pg_step1")
+STEP1_FIELDS = ("support_loss_start", "zero_gradient_step1", "norm_ratio_step1",
+                "cos_g_pg_step1")
 ACCURACY_FIELDS = ("acc_steps0",) + tuple(f"acc_{v}" for v in VARIANTS)
 DIVERGED_FIELDS = tuple(f"diverged_{v}" for v in COUNTERFACTUALS)
 FIELDS = ID_FIELDS + ACCURACY_FIELDS + DIVERGED_FIELDS + STEP1_FIELDS
@@ -118,11 +125,14 @@ def variant_gradients(variant, raw, full):
 
 
 def first_step_statistics(loss, raw, full):
-    raw_norm, full_norm = squared_norm(raw).sqrt(), squared_norm(full).sqrt()
-    dot = sum((g.double() * p.double()).sum() for g, p in zip(raw, full, strict=True))
+    """Encoder-level |Pg| / |g| and cos(g, Pg); None where a zero norm leaves them undefined."""
+    raw_norm, full_norm = squared_norm(raw).sqrt().item(), squared_norm(full).sqrt().item()
+    dot = sum((g.double() * p.double()).sum() for g, p in zip(raw, full, strict=True)).item()
     return dict(support_loss_start=loss.item(),
-                norm_ratio_step1=safe_ratio(full_norm, raw_norm).item(),
-                cos_g_pg_step1=safe_ratio(dot, raw_norm * full_norm).item())
+                zero_gradient_step1=int(raw_norm == 0),
+                norm_ratio_step1=None if raw_norm == 0 else full_norm / raw_norm,
+                cos_g_pg_step1=(None if raw_norm == 0 or full_norm == 0
+                                else dot / raw_norm / full_norm))
 
 
 @torch.enable_grad()
@@ -232,7 +242,7 @@ def _evaluate_task(learner, task, task_id, gamma, check):
         raise ValueError("Direction x magnitude decomposition requires inner_steps >= 1")
     row.update(statistics)
     for name in STEP1_FIELDS:
-        if not math.isfinite(row[name]):
+        if row[name] is not None and not math.isfinite(row[name]):
             raise ValueError(f"Task {task_id}: nonfinite diagnostic {name}={row[name]}")
     row = {field: row[field] for field in FIELDS}  # CSV column order
     if check:
@@ -241,11 +251,29 @@ def _evaluate_task(learner, task, task_id, gamma, check):
     return row
 
 
+def accumulate(sums, groups, row):
+    """Per-field sums and counts; an undefined (None) statistic is not a zero."""
+    for group in groups:
+        sums[group]["n"] += 1
+        for field in FIELDS[len(ID_FIELDS):]:
+            if row[field] is not None:
+                sums[group][field] += row[field]
+                sums[group]["n_" + field] += 1
+
+
 def print_summary(sums):
     groups = [g for g in ["ALL"] + [label for label, _, _ in SHOT_BINS] if sums.get(g)]
 
     def mean(group, field):
-        return sums[group][field] / sums[group]["n"]
+        """Mean over the tasks where the field is defined; None if there are none."""
+        count = sums[group]["n_" + field]
+        return sums[group][field] / count if count else None
+
+    def text(group, field):
+        value = mean(group, field)
+        if value is None:
+            return "n/a"
+        return f"{100 * value:.2f}" if field == "zero_gradient_step1" else f"{value:.4g}"
 
     print("\nMean accuracy in %, tasks weighted equally. Rows: all tasks, then shot bins.")
     print("group".ljust(8) + "n".rjust(7)
@@ -261,14 +289,17 @@ def print_summary(sums):
         print(group.ljust(8) + "".join(
             f"{100 * (mean(group, f'acc_{a}') - mean(group, f'acc_{b}')):+.3f}".rjust(width)
             for a, b in CONTRASTS))
-    print("\nDiverged tasks in % (scored at chance) and shared first-step statistics.")
-    print("group".ljust(8) + "".join(v.rjust(12) for v in COUNTERFACTUALS)
-          + "".join(s.rjust(20) for s in STEP1_FIELDS))
+    print("\nDiverged tasks in % (scored at chance).")
+    print("group".ljust(8) + "".join(v.rjust(12) for v in COUNTERFACTUALS))
     for group in groups:
-        print(group.ljust(8)
-              + "".join(f"{100 * mean(group, f'diverged_{v}'):.2f}".rjust(12)
-                        for v in COUNTERFACTUALS)
-              + "".join(f"{mean(group, s):.4g}".rjust(20) for s in STEP1_FIELDS))
+        print(group.ljust(8) + "".join(f"{100 * mean(group, f'diverged_{v}'):.2f}".rjust(12)
+                                       for v in COUNTERFACTUALS))
+    print("\nShared first step. zero_gradient_step1 in % of tasks; norm_ratio_step1 and "
+          "cos_g_pg_step1\nare means over the n_defined tasks with a nonzero gradient only.")
+    print("group".ljust(8) + "".join(s.rjust(21) for s in STEP1_FIELDS) + "n_defined".rjust(11))
+    for group in groups:
+        print(group.ljust(8) + "".join(text(group, s).rjust(21) for s in STEP1_FIELDS)
+              + f"{int(sums[group]['n_cos_g_pg_step1'])}".rjust(11))
     print("\nDiagnostic of one trained checkpoint on meta-test tasks; the variants "
           "are not separately trained methods.")
 
@@ -335,10 +366,7 @@ def main(argv=None):
                 # ReferenceTaskResults compares its accuracy column with acc_steps5.
                 reference.check(dict(row, acc_steps5=row["acc_full"]))
             writer.writerow(row)
-            for group in ("ALL", shot_bin(task.num_shots)):
-                sums[group]["n"] += 1
-                for field in FIELDS[len(ID_FIELDS):]:
-                    sums[group][field] += row[field]
+            accumulate(sums, ("ALL", shot_bin(task.num_shots)), row)
             if count % 100 == 0:
                 print(f"{count}/{expected_count} tasks done ({task.dataset})", flush=True)
         if count != expected_count:
