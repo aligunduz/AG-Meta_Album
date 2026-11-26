@@ -173,6 +173,13 @@ def scoring(argv) -> None:
         "max_k": 20,
         "query_images_per_class": 20
     }
+    # Must match ingestion: same episodes.json -> same test tasks and labels.
+    episodes_file = os.path.join(ref_dir, "info", "episodes.json")
+    if os.path.exists(episodes_file):
+        test_generator_config.update(
+            load_json(episodes_file).get("test_config", {}))
+        vprint(f"[+] Test episode settings from {episodes_file}", VERBOSE)
+
     test_datasets = create_datasets(test_datasets_info)
     test_loader = CompetitionDataLoader(datasets=test_datasets, 
         episodes_config=test_generator_config, seed=SEED, 

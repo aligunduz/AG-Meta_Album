@@ -220,7 +220,18 @@ def ingestion(argv) -> None:
             train_generator_config.update(user_config["train_config"])
         if "valid_config" in user_config:
             valid_generator_config.update(user_config["valid_config"])
-    
+
+    # Optional benchmark-level episode settings (e.g. miniImageNet):
+    # input_data_dir/info/episodes.json overrides config.json and the
+    # default test episodes. Meta-Album has no such file -> unchanged.
+    episodes_file = os.path.join(input_dir, "info", "episodes.json")
+    if os.path.exists(episodes_file):
+        episodes = load_json(episodes_file)
+        train_generator_config.update(episodes.get("train_config", {}))
+        valid_generator_config.update(episodes.get("valid_config", {}))
+        test_generator_config.update(episodes.get("test_config", {}))
+        vprint(f"[+] Episode settings from {episodes_file}", VERBOSE)
+
     vprint("[+] Generators config", VERBOSE)
     
     vprint("\nPreparing datasets info...", VERBOSE)
